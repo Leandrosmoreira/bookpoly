@@ -73,7 +73,7 @@ def liquidity_gate(
 
 
 def spread_gate(
-    spread: float,
+    spread: float | None,
     mid: float,
     config: SignalConfig,
 ) -> bool:
@@ -81,7 +81,7 @@ def spread_gate(
     Check if spread is acceptable (not too wide).
 
     Args:
-        spread: Bid-ask spread (ask - bid)
+        spread: Bid-ask spread (ask - bid), can be None
         mid: Mid price
         config: Signal configuration
 
@@ -89,6 +89,9 @@ def spread_gate(
         True if spread is acceptable
     """
     if mid <= 0:
+        return False
+    
+    if spread is None or spread <= 0:
         return False
 
     spread_pct = spread / mid
