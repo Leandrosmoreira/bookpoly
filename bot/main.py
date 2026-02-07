@@ -221,6 +221,7 @@ async def run_bot():
                     persistence_s=state.persistence_s,
                     score=score_result.score,
                     regime=regime,
+                    remaining_s=gate_result.time_remaining_s,  # Para forced entry
                     config=decision_config,
                 )
 

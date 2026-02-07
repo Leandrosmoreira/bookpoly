@@ -44,6 +44,12 @@ class DecisionConfig:
     # Regimes that block entry
     blocked_regimes: tuple = ("muito_alta",)
 
+    # === FORCED ENTRY (override all filters) ===
+    # Se prob >= 95% e faltam <= 2min, SEMPRE entra (ignora outros filtros)
+    force_entry_enabled: bool = True
+    force_entry_min_prob: float = 0.95  # 95% probabilidade mínima
+    force_entry_max_remaining_s: float = 120.0  # Máximo 2 minutos restantes
+
 
 @dataclass
 class Decision:
@@ -76,6 +82,9 @@ def decide(
     # Volatility regime
     regime: str | None,
 
+    # Time remaining in window (for forced entry)
+    remaining_s: float | None = None,
+
     # Config
     config: DecisionConfig | None = None,
 ) -> Decision:
@@ -101,6 +110,24 @@ def decide(
     # Determine which side we're betting on
     # We bet on the FAVORITE (against the underdog)
     side = Side.UP if prob_up > 0.5 else Side.DOWN
+
+    # Probabilidade do favorito (sempre > 0.5)
+    prob_favorite = max(prob_up, 1 - prob_up)
+
+    # === FORCED ENTRY CHECK ===
+    # Se prob >= 95% e faltam <= 2min, SEMPRE entra (ignora outros filtros)
+    if config.force_entry_enabled and remaining_s is not None:
+        if prob_favorite >= config.force_entry_min_prob and remaining_s <= config.force_entry_max_remaining_s:
+            return Decision(
+                action=Action.ENTER,
+                side=side,
+                confidence=Confidence.HIGH,
+                reason=f"forced_entry:prob={prob_favorite:.0%}_remaining={remaining_s:.0f}s",
+                score=score,
+                persistence_s=persistence_s,
+                zone=zone,
+                regime=regime,
+            )
 
     # Check gates first (mandatory)
     if not all_gates_passed:
