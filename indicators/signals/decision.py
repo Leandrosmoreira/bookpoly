@@ -45,10 +45,10 @@ class DecisionConfig:
     blocked_regimes: tuple = ("muito_alta",)
 
     # === FORCED ENTRY (override all filters) ===
-    # Se prob >= 95% e faltam <= 2min, SEMPRE entra (ignora outros filtros)
+    # Baseado na análise: Prob >=90% + <=180s tem melhor win rate com spread ok
     force_entry_enabled: bool = True
-    force_entry_min_prob: float = 0.95  # 95% probabilidade mínima
-    force_entry_max_remaining_s: float = 120.0  # Máximo 2 minutos restantes
+    force_entry_min_prob: float = 0.90  # 90% (antes: 95%) - melhor spread
+    force_entry_max_remaining_s: float = 180.0  # 3 minutos (antes: 2min) - mais tempo
 
 
 @dataclass

@@ -26,8 +26,8 @@ class SignalConfig:
 
     # === STABILITY GATE ===
     # Maximum volatility (annualized) from Binance
-    # Dados reais: média ~111% (crypto é volátil!), então 100% é razoável
-    max_volatility: float = float(os.getenv("SIGNAL_MAX_VOL", "1.00"))  # 100%
+    # Dados reais: média ~111% (crypto é volátil!), então 150% permite mais entradas
+    max_volatility: float = float(os.getenv("SIGNAL_MAX_VOL", "1.50"))  # 150%
     # Or use regime: block if "muito_alta"
     block_high_vol_regime: bool = True
 
