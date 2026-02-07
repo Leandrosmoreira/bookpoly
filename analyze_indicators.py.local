@@ -1,0 +1,520 @@
+"""
+Análise de Indicadores - Validação e Otimização
+
+Este script analisa os dados coletados para:
+1. Verificar correlação entre indicadores e outcomes
+2. Analisar distribuição dos indicadores
+3. Testar sensibilidade dos thresholds
+4. Avaliar performance por zona de probabilidade
+5. Analisar performance por horário
+
+Usage:
+    python analyze_indicators.py [--days N] [--output report.html]
+"""
+
+import sys
+import os
+import json
+import argparse
+from pathlib import Path
+from datetime import datetime, timezone, timedelta
+from collections import defaultdict
+from typing import Dict, List, Tuple, Optional
+import statistics
+
+# Add project paths
+sys.path.insert(0, str(Path(__file__).parent))
+
+try:
+    import pandas as pd
+    import numpy as np
+    HAS_PANDAS = True
+except ImportError:
+    HAS_PANDAS = False
+    print("⚠️  pandas/numpy não instalados. Instalando...")
+    print("   Execute: pip install pandas numpy")
+    print("   Continuando com análise básica...")
+
+
+def load_jsonl(filepath: Path) -> List[dict]:
+    """Carrega arquivo JSONL e retorna lista de dicts."""
+    data = []
+    try:
+        with open(filepath, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    data.append(json.loads(line))
+    except FileNotFoundError:
+        pass
+    return data
+
+
+def get_latest_files(data_dir: Path, pattern: str, days: int = 7) -> List[Path]:
+    """Encontra os arquivos mais recentes que correspondem ao padrão."""
+    files = []
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    
+    for filepath in data_dir.glob(pattern):
+        # Extrair data do nome do arquivo
+        try:
+            date_str = filepath.stem.split('_')[-1]  # Última parte antes da extensão
+            file_date = datetime.strptime(date_str, '%Y-%m-%d').replace(tzinfo=timezone.utc)
+            if file_date >= cutoff:
+                files.append(filepath)
+        except (ValueError, IndexError):
+            # Se não conseguir extrair data, incluir de qualquer forma
+            if filepath.stat().st_mtime >= cutoff.timestamp():
+                files.append(filepath)
+    
+    return sorted(files, reverse=True)
+
+
+def analyze_correlation_with_outcome(books_data: List[dict], outcomes: Dict[str, bool]) -> Dict:
+    """Analisa correlação entre indicadores e outcomes."""
+    results = {
+        'imbalance': {'up_wins': 0, 'up_total': 0, 'down_wins': 0, 'down_total': 0},
+        'microprice': {'above_mid_wins': 0, 'above_mid_total': 0, 'below_mid_wins': 0, 'below_mid_total': 0},
+        'spread': {'narrow_wins': 0, 'narrow_total': 0, 'wide_wins': 0, 'wide_total': 0},
+    }
+    
+    for row in books_data:
+        market = row.get('market', '')
+        condition_id = row.get('condition_id', '')
+        key = f"{market}_{condition_id}"
+        
+        if key not in outcomes:
+            continue
+        
+        won = outcomes[key]
+        yes_data = row.get('yes', {}) or {}
+        
+        # Imbalance
+        imbalance = yes_data.get('imbalance', 0)
+        if imbalance > 0:
+            results['imbalance']['up_total'] += 1
+            if won:
+                results['imbalance']['up_wins'] += 1
+        elif imbalance < 0:
+            results['imbalance']['down_total'] += 1
+            if not won:
+                results['imbalance']['down_wins'] += 1
+        
+        # Microprice vs Mid
+        mid = yes_data.get('mid', 0)
+        # Microprice seria calculado, mas vamos usar best_bid/best_ask como proxy
+        best_bid = yes_data.get('best_bid', 0)
+        best_ask = yes_data.get('best_ask', 0)
+        if mid > 0:
+            microprice = (best_bid + best_ask) / 2
+            if microprice > mid:
+                results['microprice']['above_mid_total'] += 1
+                if won:
+                    results['microprice']['above_mid_wins'] += 1
+            else:
+                results['microprice']['below_mid_total'] += 1
+                if not won:
+                    results['microprice']['below_mid_wins'] += 1
+        
+        # Spread
+        spread = yes_data.get('spread', 0)
+        spread_pct = (spread / mid * 100) if mid > 0 else 0
+        if spread_pct < 2.0:  # Narrow spread
+            results['spread']['narrow_total'] += 1
+            if won:
+                results['spread']['narrow_wins'] += 1
+        else:  # Wide spread
+            results['spread']['wide_total'] += 1
+            if won:
+                results['spread']['wide_wins'] += 1
+    
+    # Calcular win rates
+    for metric in results:
+        for key in list(results[metric].keys()):
+            if key.endswith('_total'):
+                wins_key = key.replace('_total', '_wins')
+                total = results[metric][key]
+                wins = results[metric].get(wins_key, 0)
+                if total > 0:
+                    results[metric][key.replace('_total', '_win_rate')] = wins / total
+                else:
+                    results[metric][key.replace('_total', '_win_rate')] = 0
+    
+    return results
+
+
+def analyze_distribution(books_data: List[dict], volatility_data: List[dict]) -> Dict:
+    """Analisa distribuição dos indicadores."""
+    stats = {
+        'imbalance': [],
+        'spread_pct': [],
+        'bid_depth': [],
+        'ask_depth': [],
+        'volatility': [],
+        'latency_ms': [],
+    }
+    
+    for row in books_data:
+        yes_data = row.get('yes', {}) or {}
+        
+        imbalance = yes_data.get('imbalance', 0)
+        if imbalance is not None:
+            stats['imbalance'].append(imbalance)
+        
+        mid = yes_data.get('mid', 0)
+        spread = yes_data.get('spread', 0)
+        if mid > 0 and spread is not None:
+            stats['spread_pct'].append((spread / mid) * 100)
+        
+        bid_depth = yes_data.get('bid_depth', 0)
+        ask_depth = yes_data.get('ask_depth', 0)
+        if bid_depth:
+            stats['bid_depth'].append(bid_depth)
+        if ask_depth:
+            stats['ask_depth'].append(ask_depth)
+        
+        fetch_data = row.get('fetch', {}) or {}
+        latency = fetch_data.get('latency_ms', 0)
+        if latency:
+            stats['latency_ms'].append(latency)
+    
+    for row in volatility_data:
+        vol_data = row.get('volatility', {}) or {}
+        rv_1h = vol_data.get('rv_1h', 0)
+        if rv_1h:
+            stats['volatility'].append(rv_1h)
+    
+    # Calcular estatísticas
+    distribution = {}
+    for metric, values in stats.items():
+        if values:
+            distribution[metric] = {
+                'count': len(values),
+                'mean': statistics.mean(values),
+                'median': statistics.median(values),
+                'stdev': statistics.stdev(values) if len(values) > 1 else 0,
+                'min': min(values),
+                'max': max(values),
+                'p25': statistics.quantiles(values, n=4)[0] if len(values) > 1 else values[0],
+                'p75': statistics.quantiles(values, n=4)[2] if len(values) > 1 else values[0],
+            }
+    
+    return distribution
+
+
+def test_threshold_sensitivity(books_data: List[dict], outcomes: Dict[str, bool]) -> Dict:
+    """Testa diferentes valores de thresholds."""
+    thresholds = {
+        'min_depth': [100, 300, 500, 1000],
+        'max_spread_pct': [1.0, 2.0, 3.0, 5.0],
+        'max_volatility': [30, 50, 70],
+        'min_persistence_s': [10, 20, 30, 60],
+    }
+    
+    results = {}
+    
+    # Testar min_depth
+    for depth in thresholds['min_depth']:
+        passed = 0
+        won = 0
+        for row in books_data:
+            yes_data = row.get('yes', {}) or {}
+            bid_depth = yes_data.get('bid_depth', 0)
+            ask_depth = yes_data.get('ask_depth', 0)
+            total_depth = bid_depth + ask_depth
+            
+            if total_depth >= depth:
+                passed += 1
+                market = row.get('market', '')
+                condition_id = row.get('condition_id', '')
+                key = f"{market}_{condition_id}"
+                if key in outcomes and outcomes[key]:
+                    won += 1
+        
+        if passed > 0:
+            results[f'min_depth_{depth}'] = {
+                'passed': passed,
+                'won': won,
+                'win_rate': won / passed if passed > 0 else 0,
+            }
+    
+    # Testar max_spread_pct
+    for spread_pct in thresholds['max_spread_pct']:
+        passed = 0
+        won = 0
+        for row in books_data:
+            yes_data = row.get('yes', {}) or {}
+            mid = yes_data.get('mid', 0)
+            spread = yes_data.get('spread', 0)
+            
+            if mid > 0 and spread is not None:
+                actual_spread_pct = (spread / mid) * 100
+                if actual_spread_pct <= spread_pct:
+                    passed += 1
+                    market = row.get('market', '')
+                    condition_id = row.get('condition_id', '')
+                    key = f"{market}_{condition_id}"
+                    if key in outcomes and outcomes[key]:
+                        won += 1
+        
+        if passed > 0:
+            results[f'max_spread_{spread_pct}'] = {
+                'passed': passed,
+                'won': won,
+                'win_rate': won / passed if passed > 0 else 0,
+            }
+    
+    return results
+
+
+def analyze_by_zone(books_data: List[dict], outcomes: Dict[str, bool]) -> Dict:
+    """Analisa performance por zona de probabilidade."""
+    zones = {
+        'danger': {'total': 0, 'won': 0},      # < 2%
+        'caution': {'total': 0, 'won': 0},     # 2-5%
+        'safe': {'total': 0, 'won': 0},        # 5-15%
+        'neutral': {'total': 0, 'won': 0},     # > 15%
+    }
+    
+    for row in books_data:
+        yes_data = row.get('yes', {}) or {}
+        prob_up = yes_data.get('mid', 0.5)
+        
+        # Calcular probabilidade do underdog
+        underdog_prob = min(prob_up, 1.0 - prob_up)
+        
+        # Classificar zona
+        if underdog_prob < 0.02:
+            zone = 'danger'
+        elif underdog_prob < 0.05:
+            zone = 'caution'
+        elif underdog_prob < 0.15:
+            zone = 'safe'
+        else:
+            zone = 'neutral'
+        
+        zones[zone]['total'] += 1
+        
+        market = row.get('market', '')
+        condition_id = row.get('condition_id', '')
+        key = f"{market}_{condition_id}"
+        
+        if key in outcomes:
+            if outcomes[key]:  # UP won
+                if prob_up > 0.5:  # We bet on UP
+                    zones[zone]['won'] += 1
+            else:  # DOWN won
+                if prob_up < 0.5:  # We bet on DOWN
+                    zones[zone]['won'] += 1
+    
+    # Calcular win rates
+    for zone, data in zones.items():
+        if data['total'] > 0:
+            data['win_rate'] = data['won'] / data['total']
+        else:
+            data['win_rate'] = 0
+    
+    return zones
+
+
+def analyze_by_time(books_data: List[dict], outcomes: Dict[str, bool]) -> Dict:
+    """Analisa performance por horário."""
+    time_slots = defaultdict(lambda: {'total': 0, 'won': 0})
+    
+    for row in books_data:
+        ts_ms = row.get('ts_ms', 0)
+        if ts_ms:
+            dt = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc)
+            hour = dt.hour
+            
+            # Classificar em slots
+            if 0 <= hour < 6:
+                slot = 'madrugada_00-06'
+            elif 6 <= hour < 12:
+                slot = 'manha_06-12'
+            elif 12 <= hour < 18:
+                slot = 'tarde_12-18'
+            else:
+                slot = 'noite_18-24'
+            
+            time_slots[slot]['total'] += 1
+            
+            market = row.get('market', '')
+            condition_id = row.get('condition_id', '')
+            key = f"{market}_{condition_id}"
+            
+            if key in outcomes and outcomes[key]:
+                time_slots[slot]['won'] += 1
+    
+    # Calcular win rates
+    for slot, data in time_slots.items():
+        if data['total'] > 0:
+            data['win_rate'] = data['won'] / data['total']
+        else:
+            data['win_rate'] = 0
+    
+    return dict(time_slots)
+
+
+def load_outcomes(data_dir: Path, days: int = 7) -> Dict[str, bool]:
+    """Carrega outcomes dos mercados (se disponíveis)."""
+    # Por enquanto, retornar vazio - outcomes precisariam ser coletados separadamente
+    # ou inferidos dos dados de mercado
+    outcomes = {}
+    
+    # TODO: Implementar carregamento de outcomes reais
+    # Por exemplo, de um arquivo outcomes.jsonl ou da API do Polymarket
+    
+    return outcomes
+
+
+def generate_report(results: Dict, output_file: Optional[Path] = None):
+    """Gera relatório de análise."""
+    report = []
+    report.append("=" * 80)
+    report.append("RELATÓRIO DE ANÁLISE DE INDICADORES")
+    report.append("=" * 80)
+    report.append("")
+    
+    # 1. Distribuição
+    if 'distribution' in results:
+        report.append("1. DISTRIBUIÇÃO DOS INDICADORES")
+        report.append("-" * 80)
+        for metric, stats in results['distribution'].items():
+            report.append(f"\n{metric.upper()}:")
+            report.append(f"  Média: {stats['mean']:.4f}")
+            report.append(f"  Mediana: {stats['median']:.4f}")
+            report.append(f"  Desvio Padrão: {stats['stdev']:.4f}")
+            report.append(f"  Min: {stats['min']:.4f} | Max: {stats['max']:.4f}")
+            report.append(f"  P25: {stats['p25']:.4f} | P75: {stats['p75']:.4f}")
+        report.append("")
+    
+    # 2. Correlação
+    if 'correlation' in results:
+        report.append("2. CORRELAÇÃO COM OUTCOMES")
+        report.append("-" * 80)
+        for metric, data in results['correlation'].items():
+            report.append(f"\n{metric.upper()}:")
+            for key, value in data.items():
+                if 'win_rate' in key:
+                    report.append(f"  {key}: {value:.2%}")
+        report.append("")
+    
+    # 3. Thresholds
+    if 'thresholds' in results:
+        report.append("3. SENSIBILIDADE DE THRESHOLDS")
+        report.append("-" * 80)
+        for threshold, data in results['thresholds'].items():
+            report.append(f"\n{threshold}:")
+            report.append(f"  Passou: {data['passed']}")
+            report.append(f"  Ganhou: {data['won']}")
+            report.append(f"  Win Rate: {data['win_rate']:.2%}")
+        report.append("")
+    
+    # 4. Zonas
+    if 'zones' in results:
+        report.append("4. PERFORMANCE POR ZONA")
+        report.append("-" * 80)
+        for zone, data in results['zones'].items():
+            report.append(f"\n{zone.upper()}:")
+            report.append(f"  Total: {data['total']}")
+            report.append(f"  Ganhou: {data['won']}")
+            report.append(f"  Win Rate: {data['win_rate']:.2%}")
+        report.append("")
+    
+    # 5. Horário
+    if 'time' in results:
+        report.append("5. PERFORMANCE POR HORÁRIO")
+        report.append("-" * 80)
+        for slot, data in sorted(results['time'].items()):
+            report.append(f"\n{slot}:")
+            report.append(f"  Total: {data['total']}")
+            report.append(f"  Ganhou: {data['won']}")
+            report.append(f"  Win Rate: {data['win_rate']:.2%}")
+        report.append("")
+    
+    report_text = "\n".join(report)
+    
+    if output_file:
+        output_file.write_text(report_text, encoding='utf-8')
+        print(f"✅ Relatório salvo em: {output_file}")
+    else:
+        print(report_text)
+    
+    return report_text
+
+
+def main():
+    parser = argparse.ArgumentParser(description='Analisa indicadores coletados')
+    parser.add_argument('--days', type=int, default=7, help='Número de dias para analisar')
+    parser.add_argument('--output', type=str, help='Arquivo de saída (ex: report.txt)')
+    parser.add_argument('--data-dir', type=str, default='data/raw', help='Diretório com dados')
+    args = parser.parse_args()
+    
+    data_dir = Path(args.data_dir)
+    
+    print(f"📊 Carregando dados dos últimos {args.days} dias...")
+    
+    # Carregar dados
+    books_data = []
+    volatility_data = []
+    
+    # Carregar books
+    books_dir = data_dir / 'books'
+    if books_dir.exists():
+        for filepath in get_latest_files(books_dir, '*_*.jsonl', args.days):
+            books_data.extend(load_jsonl(filepath))
+    
+    # Carregar volatility
+    vol_dir = data_dir / 'volatility'
+    if vol_dir.exists():
+        for filepath in get_latest_files(vol_dir, '*_*.jsonl', args.days):
+            volatility_data.extend(load_jsonl(filepath))
+    
+    print(f"   Books: {len(books_data)} registros")
+    print(f"   Volatility: {len(volatility_data)} registros")
+    
+    if not books_data:
+        print("❌ Nenhum dado encontrado!")
+        return
+    
+    # Carregar outcomes (se disponíveis)
+    outcomes = load_outcomes(data_dir, args.days)
+    print(f"   Outcomes: {len(outcomes)} disponíveis")
+    
+    # Executar análises
+    print("\n🔍 Executando análises...")
+    
+    results = {}
+    
+    # 1. Distribuição
+    print("   1. Distribuição dos indicadores...")
+    results['distribution'] = analyze_distribution(books_data, volatility_data)
+    
+    # 2. Correlação (se houver outcomes)
+    if outcomes:
+        print("   2. Correlação com outcomes...")
+        results['correlation'] = analyze_correlation_with_outcome(books_data, outcomes)
+        
+        print("   3. Sensibilidade de thresholds...")
+        results['thresholds'] = test_threshold_sensitivity(books_data, outcomes)
+        
+        print("   4. Performance por zona...")
+        results['zones'] = analyze_by_zone(books_data, outcomes)
+        
+        print("   5. Performance por horário...")
+        results['time'] = analyze_by_time(books_data, outcomes)
+    else:
+        print("   ⚠️  Outcomes não disponíveis - pulando análises de correlação")
+    
+    # Gerar relatório
+    print("\n📄 Gerando relatório...")
+    output_file = Path(args.output) if args.output else None
+    generate_report(results, output_file)
+    
+    print("\n✅ Análise concluída!")
+
+
+if __name__ == '__main__':
+    main()
+

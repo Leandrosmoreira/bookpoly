@@ -1,0 +1,21 @@
+[Unit]
+Description=BookPoly Volatility Indicator Recorder
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/bookpoly
+Environment="PATH=/root/bookpoly/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+ExecStart=/root/bookpoly/venv/bin/python -m indicators.volatility.main
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+# Limites de recursos
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
+
