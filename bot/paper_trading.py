@@ -150,22 +150,27 @@ class PaperPortfolio:
 
         return True
 
-    def close_trade(self, market: str, outcome: str, final_price: float) -> PaperTrade | None:
-        """Close a trade with outcome."""
+    def close_trade(self, market: str, outcome: str, btc_went_up: bool) -> PaperTrade | None:
+        """
+        Close a trade with real outcome.
+
+        Args:
+            market: Market name (e.g., "BTC15m")
+            outcome: "ended" when window closes
+            btc_went_up: True if BTC actually went UP during the window
+        """
         if market not in self.open_trades:
             return None
 
         trade = self.open_trades.pop(market)
-        trade.exit_price = final_price
+        trade.exit_price = 1.0 if btc_went_up else 0.0  # Real settlement price
 
         # Determine if we won
-        # We bet on the FAVORITE
-        # If we bet UP and price ended > 0.5, we won
-        # If we bet DOWN and price ended < 0.5, we won
+        # We bet on UP or DOWN - check if our prediction was correct
         if trade.side == "UP":
-            won = final_price > 0.5
+            won = btc_went_up  # We win if BTC went up
         else:
-            won = final_price < 0.5
+            won = not btc_went_up  # We win if BTC went down
 
         if won:
             # We get $1 per share
@@ -296,6 +301,12 @@ async def run_paper_trading(coins: list[str], verbose: bool = False):
     # Track windows to detect end
     current_windows: dict[str, int] = {}  # market -> window_start
 
+    # Track BTC price at window start to determine outcome
+    window_start_prices: dict[str, float] = {}  # market -> BTC price at window start
+
+    # Track entry prob to determine outcome (fallback)
+    entry_probs: dict[str, float] = {}  # market -> prob_up at entry
+
     seq = 0
     last_status_time = time.time()
 
@@ -324,22 +335,56 @@ async def run_paper_trading(coins: list[str], verbose: bool = False):
 
                 window_start = poly_data.get("window_start", 0)
 
+                # Get current BTC price from Binance
+                current_btc_price = None
+                if binance_data:
+                    price_data = binance_data.get("price", {}) or {}
+                    current_btc_price = price_data.get("close", 0)
+
                 # Check if window changed (to close trades)
                 if market in current_windows:
                     prev_window = current_windows[market]
-                    if window_start != prev_window and market in portfolio.open_trades:
-                        # Window ended! Close the trade
-                        yes_data = poly_data.get("yes", {}) or {}
-                        final_prob = yes_data.get("mid", 0.5)
+                    if window_start != prev_window:
+                        # Window changed!
+                        if market in portfolio.open_trades:
+                            # Close trade - determine outcome
+                            trade = portfolio.open_trades.get(market)
+                            start_price = window_start_prices.get(market)
 
-                        trade = portfolio.close_trade(market, "ended", final_prob)
-                        if trade:
-                            emoji = "✅" if trade.status == "won" else "❌"
-                            log.info(
-                                f"[{market}] {emoji} CLOSED: {trade.side} "
-                                f"entry=${trade.entry_price:.2f} exit=${final_prob:.2f} "
-                                f"PnL=${trade.pnl:+.2f}"
-                            )
+                            if trade and current_btc_price and start_price:
+                                # Compare prices: did BTC go UP or DOWN?
+                                btc_went_up = current_btc_price > start_price
+                                price_change = ((current_btc_price - start_price) / start_price) * 100
+
+                                closed_trade = portfolio.close_trade(market, "ended", btc_went_up)
+                                if closed_trade:
+                                    emoji = "✅" if closed_trade.status == "won" else "❌"
+                                    result = "UP" if btc_went_up else "DOWN"
+                                    log.info(
+                                        f"[{market}] {emoji} CLOSED: bet={closed_trade.side} result={result} "
+                                        f"BTC ${start_price:.0f}→${current_btc_price:.0f} ({price_change:+.2f}%) "
+                                        f"PnL=${closed_trade.pnl:+.2f}"
+                                    )
+                            elif trade:
+                                # Fallback: use probability heuristic
+                                entry_prob = entry_probs.get(market, 0.5)
+                                btc_went_up = entry_prob > 0.5
+
+                                closed_trade = portfolio.close_trade(market, "ended", btc_went_up)
+                                if closed_trade:
+                                    emoji = "✅" if closed_trade.status == "won" else "❌"
+                                    log.info(
+                                        f"[{market}] {emoji} CLOSED (no price data): bet={closed_trade.side} "
+                                        f"PnL=${closed_trade.pnl:+.2f}"
+                                    )
+
+                        # Record price at start of new window
+                        if current_btc_price:
+                            window_start_prices[market] = current_btc_price
+
+                # If this is first time seeing this window, record start price
+                if market not in current_windows and current_btc_price:
+                    window_start_prices[market] = current_btc_price
 
                 current_windows[market] = window_start
 
@@ -475,11 +520,16 @@ async def run_paper_trading(coins: list[str], verbose: bool = False):
                     )
 
                     if portfolio.open_trade(trade):
+                        # Save entry prob for fallback outcome detection
+                        entry_probs[market] = prob_up
+
+                        btc_price_str = f"BTC=${current_btc_price:.0f}" if current_btc_price else ""
                         log.info(
                             f"[{market}] ★ ENTER {side} ★ "
                             f"@ ${entry_price:.2f} "
                             f"score={score_result.score:.2f} "
                             f"conf={decision.confidence.value} "
+                            f"{btc_price_str} "
                             f"reason={decision.reason}"
                         )
 
