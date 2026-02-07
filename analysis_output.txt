@@ -1,0 +1,226 @@
+🔍 Iniciando análise completa dos order books...
+📁 Diretório: /root/bookpoly/data
+
+Analisando BTC15m... (3 arquivos)
+  ✓ 227,746 registros processados
+
+Analisando ETH15m... (3 arquivos)
+  ✓ 227,762 registros processados
+
+Analisando SOL15m... (3 arquivos)
+  ✓ 227,780 registros processados
+
+Analisando XRP15m... (3 arquivos)
+  ✓ 227,805 registros processados
+
+================================================================================
+ANÁLISE COMPLETA DOS ORDER BOOKS
+================================================================================
+
+================================================================================
+MERCADO: BTC15m
+================================================================================
+
+📊 Estatísticas Gerais:
+  Total de registros: 227,746
+  Total de windows: 255
+
+💰 Spread:
+  Média: 0.0110 (7.12%)
+  Mediana: 0.0100 (2.11%)
+  P95: 0.0200 (40.00%)
+  Min: 0.0010 | Max: 0.3600
+
+💧 Depth (Liquidez):
+  Média: $104,294
+  Mediana: $107,474
+  P25: $79,414 | P75: $131,156
+  P95: $160,196
+
+⚖️  Imbalance:
+  Média: -0.0037
+  Mediana: -0.0100
+  Range: [-1.0000, 1.0000]
+
+📈 Probabilidade:
+  Média: 50.94%
+  Mediana: 51.50%
+  Distribuição por zona:
+    Danger (<2% ou >98%): 13.4%
+    Caution (2-5% ou 95-98%): 7.3%
+    Safe (5-15% ou 85-95%): 17.1%
+    Neutral (15-85%): 62.2%
+
+⏱️  Latency:
+  Média: 188.4ms
+  Mediana: 178.0ms
+  P95: 259.9ms
+
+🕐 Análise por Hora (Top 5 por liquidez):
+  19h: 7,169 registros | Depth médio: $120,457 | Spread médio: 5.98%
+  20h: 7,173 registros | Depth médio: $118,435 | Spread médio: 10.06%
+  21h: 7,177 registros | Depth médio: $117,918 | Spread médio: 4.51%
+  18h: 7,173 registros | Depth médio: $115,895 | Spread médio: 12.64%
+  15h: 10,769 registros | Depth médio: $114,731 | Spread médio: 6.30%
+
+================================================================================
+MERCADO: ETH15m
+================================================================================
+
+📊 Estatísticas Gerais:
+  Total de registros: 227,762
+  Total de windows: 255
+
+💰 Spread:
+  Média: 0.0102 (7.41%)
+  Mediana: 0.0100 (2.02%)
+  P95: 0.0100 (40.00%)
+  Min: 0.0010 | Max: 0.9200
+
+💧 Depth (Liquidez):
+  Média: $68,706
+  Mediana: $66,718
+  P25: $37,793 | P75: $97,919
+  P95: $133,894
+
+⚖️  Imbalance:
+  Média: -0.0137
+  Mediana: -0.0121
+  Range: [-1.0000, 1.0000]
+
+📈 Probabilidade:
+  Média: 50.71%
+  Mediana: 50.50%
+  Distribuição por zona:
+    Danger (<2% ou >98%): 12.7%
+    Caution (2-5% ou 95-98%): 8.6%
+    Safe (5-15% ou 85-95%): 15.9%
+    Neutral (15-85%): 62.7%
+
+⏱️  Latency:
+  Média: 188.4ms
+  Mediana: 178.0ms
+  P95: 259.9ms
+
+🕐 Análise por Hora (Top 5 por liquidez):
+  19h: 7,169 registros | Depth médio: $90,660 | Spread médio: 5.19%
+  08h: 10,773 registros | Depth médio: $89,642 | Spread médio: 4.07%
+  13h: 10,768 registros | Depth médio: $82,147 | Spread médio: 4.53%
+  09h: 10,768 registros | Depth médio: $81,565 | Spread médio: 5.24%
+  18h: 7,173 registros | Depth médio: $80,917 | Spread médio: 12.89%
+
+================================================================================
+MERCADO: SOL15m
+================================================================================
+
+📊 Estatísticas Gerais:
+  Total de registros: 227,780
+  Total de windows: 255
+
+💰 Spread:
+  Média: 0.0108 (8.30%)
+  Mediana: 0.0100 (2.11%)
+  P95: 0.0200 (46.15%)
+  Min: 0.0010 | Max: 0.9100
+
+💧 Depth (Liquidez):
+  Média: $45,553
+  Mediana: $40,619
+  P25: $15,695 | P75: $72,324
+  P95: $108,498
+
+⚖️  Imbalance:
+  Média: -0.0072
+  Mediana: -0.0122
+  Range: [-1.0000, 1.0000]
+
+📈 Probabilidade:
+  Média: 51.38%
+  Mediana: 51.50%
+  Distribuição por zona:
+    Danger (<2% ou >98%): 14.8%
+    Caution (2-5% ou 95-98%): 9.5%
+    Safe (5-15% ou 85-95%): 15.4%
+    Neutral (15-85%): 60.0%
+
+⏱️  Latency:
+  Média: 188.4ms
+  Mediana: 178.0ms
+  P95: 259.9ms
+
+🕐 Análise por Hora (Top 5 por liquidez):
+  19h: 7,169 registros | Depth médio: $63,773 | Spread médio: 6.36%
+  08h: 10,773 registros | Depth médio: $60,830 | Spread médio: 3.33%
+  11h: 10,774 registros | Depth médio: $60,446 | Spread médio: 6.67%
+  09h: 10,768 registros | Depth médio: $56,862 | Spread médio: 4.65%
+  12h: 10,769 registros | Depth médio: $56,363 | Spread médio: 5.52%
+
+================================================================================
+MERCADO: XRP15m
+================================================================================
+
+📊 Estatísticas Gerais:
+  Total de registros: 227,805
+  Total de windows: 255
+
+💰 Spread:
+  Média: 0.0117 (9.29%)
+  Mediana: 0.0100 (2.30%)
+  P95: 0.0200 (57.14%)
+  Min: 0.0010 | Max: 0.9300
+
+💧 Depth (Liquidez):
+  Média: $33,707
+  Mediana: $21,575
+  P25: $9,594 | P75: $56,535
+  P95: $92,810
+
+⚖️  Imbalance:
+  Média: -0.0102
+  Mediana: -0.0069
+  Range: [-1.0000, 1.0000]
+
+📈 Probabilidade:
+  Média: 49.53%
+  Mediana: 49.50%
+  Distribuição por zona:
+    Danger (<2% ou >98%): 14.7%
+    Caution (2-5% ou 95-98%): 10.0%
+    Safe (5-15% ou 85-95%): 17.1%
+    Neutral (15-85%): 58.0%
+
+⏱️  Latency:
+  Média: 188.4ms
+  Mediana: 178.0ms
+  P95: 259.9ms
+
+🕐 Análise por Hora (Top 5 por liquidez):
+  19h: 7,169 registros | Depth médio: $47,472 | Spread médio: 11.62%
+  17h: 10,029 registros | Depth médio: $46,901 | Spread médio: 9.82%
+  21h: 7,177 registros | Depth médio: $45,328 | Spread médio: 8.29%
+  18h: 7,173 registros | Depth médio: $43,273 | Spread médio: 15.35%
+  07h: 10,779 registros | Depth médio: $42,660 | Spread médio: 10.39%
+
+================================================================================
+RECOMENDAÇÕES PARA O BOT
+================================================================================
+
+### BTC15m
+  - Spread muito alto (P95=40.0%). Considere aumentar max_spread_pct ou evitar horários com spread alto.
+  - Melhores horários para liquidez: 19h, 20h, 21h
+
+### ETH15m
+  - Spread muito alto (P95=40.0%). Considere aumentar max_spread_pct ou evitar horários com spread alto.
+  - Melhores horários para liquidez: 19h, 08h, 13h
+
+### SOL15m
+  - Spread muito alto (P95=46.2%). Considere aumentar max_spread_pct ou evitar horários com spread alto.
+  - Melhores horários para liquidez: 19h, 08h, 11h
+
+### XRP15m
+  - Spread muito alto (P95=57.1%). Considere aumentar max_spread_pct ou evitar horários com spread alto.
+  - Melhores horários para liquidez: 19h, 17h, 21h
+
+================================================================================
+
+💾 Resultados salvos em: /root/bookpoly/analysis_books_complete.json

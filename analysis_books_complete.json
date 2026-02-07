@@ -1,0 +1,838 @@
+{
+  "BTC15m": {
+    "market": "BTC15m",
+    "total_rows": 227746,
+    "total_windows": 255,
+    "spread_count": 213686,
+    "spread_mean": 0.011015419821607406,
+    "spread_median": 0.01,
+    "spread_min": 0.001,
+    "spread_max": 0.36,
+    "spread_std": 0.006302917334946848,
+    "spread_p25": 0.01,
+    "spread_p75": 0.01,
+    "spread_p90": 0.01,
+    "spread_p95": 0.02,
+    "spread_pct_count": 213686,
+    "spread_pct_mean": 7.120947238739336,
+    "spread_pct_median": 2.105263157894737,
+    "spread_pct_min": 0.10015022533800699,
+    "spread_pct_max": 166.66666666666669,
+    "spread_pct_std": 15.355992396754221,
+    "spread_pct_p25": 1.360544217687075,
+    "spread_pct_p75": 4.444444444444445,
+    "spread_pct_p90": 15.384615384615383,
+    "spread_pct_p95": 40.0,
+    "depth_count": 227742,
+    "depth_mean": 104294.44346172424,
+    "depth_median": 107474.42000000001,
+    "depth_min": 3476.68,
+    "depth_max": 471204.74,
+    "depth_std": 36986.74502511368,
+    "depth_p25": 79414.1375,
+    "depth_p75": 131156.39749999996,
+    "depth_p90": 147998.046,
+    "depth_p95": 160196.1455,
+    "imbalance_count": 227746,
+    "imbalance_mean": -0.003708267982752716,
+    "imbalance_median": -0.01,
+    "imbalance_min": -1.0,
+    "imbalance_max": 1.0,
+    "imbalance_std": 0.37919300432453595,
+    "imbalance_p25": -0.2141,
+    "imbalance_p75": 0.2019,
+    "imbalance_p90": 0.3822,
+    "imbalance_p95": 0.684965,
+    "prob_count": 227746,
+    "prob_mean": 0.5094271227595655,
+    "prob_median": 0.515,
+    "prob_min": 0.0,
+    "prob_max": 0.999,
+    "prob_std": 0.31380807101197983,
+    "prob_p25": 0.245,
+    "prob_p75": 0.785,
+    "prob_p90": 0.9549999999999998,
+    "prob_p95": 0.9899999999999999,
+    "overround_count": 227746,
+    "overround_mean": 0.010336207880709212,
+    "overround_median": 0.01,
+    "overround_min": -0.03,
+    "overround_max": 0.36,
+    "overround_std": 0.006673365060923677,
+    "overround_p25": 0.01,
+    "overround_p75": 0.01,
+    "overround_p90": 0.01,
+    "overround_p95": 0.02,
+    "latency_count": 227745,
+    "latency_mean": 188.40610551274452,
+    "latency_median": 178.0,
+    "latency_min": 145.3,
+    "latency_max": 32526.8,
+    "latency_std": 96.44643402926853,
+    "latency_p25": 160.3,
+    "latency_p75": 194.0,
+    "latency_p90": 234.5,
+    "latency_p95": 259.9,
+    "prob_zones": {
+      "danger": 30513,
+      "caution": 16519,
+      "safe": 38993,
+      "neutral": 141663
+    },
+    "prob_zones_pct": {
+      "danger": 13.397820378843099,
+      "caution": 7.253255820080265,
+      "safe": 17.121266674277486,
+      "neutral": 62.202190159212456
+    },
+    "hourly_stats": {
+      "0": {
+        "count": 7160,
+        "avg_depth": 92352.46352234637,
+        "avg_spread_pct": 8.833923728234101
+      },
+      "1": {
+        "count": 7182,
+        "avg_depth": 91408.61415761626,
+        "avg_spread_pct": 2.315228217495159
+      },
+      "2": {
+        "count": 9663,
+        "avg_depth": 93169.81674324744,
+        "avg_spread_pct": 10.537730516406832
+      },
+      "3": {
+        "count": 10773,
+        "avg_depth": 99185.54312633435,
+        "avg_spread_pct": 6.366294361705538
+      },
+      "4": {
+        "count": 10774,
+        "avg_depth": 81084.47710506775,
+        "avg_spread_pct": 7.284467211963107
+      },
+      "5": {
+        "count": 10774,
+        "avg_depth": 88152.26442268424,
+        "avg_spread_pct": 7.721152438158634
+      },
+      "6": {
+        "count": 10771,
+        "avg_depth": 105136.96651657228,
+        "avg_spread_pct": 9.909021346503307
+      },
+      "7": {
+        "count": 10779,
+        "avg_depth": 107006.70292234901,
+        "avg_spread_pct": 8.124266421637657
+      },
+      "8": {
+        "count": 10773,
+        "avg_depth": 114301.32640582939,
+        "avg_spread_pct": 2.6824600357796813
+      },
+      "9": {
+        "count": 10768,
+        "avg_depth": 114351.93492291977,
+        "avg_spread_pct": 6.027546050659382
+      },
+      "10": {
+        "count": 10772,
+        "avg_depth": 106437.16196620869,
+        "avg_spread_pct": 10.284541976179122
+      },
+      "11": {
+        "count": 10774,
+        "avg_depth": 106087.84802580286,
+        "avg_spread_pct": 5.774726298781384
+      },
+      "12": {
+        "count": 10769,
+        "avg_depth": 101028.94920976878,
+        "avg_spread_pct": 7.406267990610497
+      },
+      "13": {
+        "count": 10768,
+        "avg_depth": 108271.01342031946,
+        "avg_spread_pct": 3.6371152688491657
+      },
+      "14": {
+        "count": 10708,
+        "avg_depth": 100001.170104624,
+        "avg_spread_pct": 8.523324001469174
+      },
+      "15": {
+        "count": 10769,
+        "avg_depth": 114730.64125638407,
+        "avg_spread_pct": 6.296984106547034
+      },
+      "16": {
+        "count": 10768,
+        "avg_depth": 107048.81003064636,
+        "avg_spread_pct": 4.159872128276204
+      },
+      "17": {
+        "count": 9970,
+        "avg_depth": 103490.58075727182,
+        "avg_spread_pct": 9.146539031681215
+      },
+      "18": {
+        "count": 7173,
+        "avg_depth": 115895.27524745573,
+        "avg_spread_pct": 12.637156435621282
+      },
+      "19": {
+        "count": 7169,
+        "avg_depth": 120457.37231413028,
+        "avg_spread_pct": 5.981329735960442
+      },
+      "20": {
+        "count": 7173,
+        "avg_depth": 118434.92181678751,
+        "avg_spread_pct": 10.061850175725343
+      },
+      "21": {
+        "count": 7177,
+        "avg_depth": 117917.99900376202,
+        "avg_spread_pct": 4.508276891283474
+      },
+      "22": {
+        "count": 7167,
+        "avg_depth": 102880.32118041022,
+        "avg_spread_pct": 3.697950314766643
+      },
+      "23": {
+        "count": 7172,
+        "avg_depth": 102047.02276770775,
+        "avg_spread_pct": 10.00792755542357
+      }
+    }
+  },
+  "ETH15m": {
+    "market": "ETH15m",
+    "total_rows": 227762,
+    "total_windows": 255,
+    "spread_count": 218439,
+    "spread_mean": 0.010165799147588113,
+    "spread_median": 0.01,
+    "spread_min": 0.001,
+    "spread_max": 0.92,
+    "spread_std": 0.005834870747836064,
+    "spread_p25": 0.01,
+    "spread_p75": 0.01,
+    "spread_p90": 0.01,
+    "spread_p95": 0.01,
+    "spread_pct_count": 218439,
+    "spread_pct_mean": 7.407296466184427,
+    "spread_pct_median": 2.0202020202020203,
+    "spread_pct_min": 0.10015022533800699,
+    "spread_pct_max": 184.0,
+    "spread_pct_std": 16.684626292067904,
+    "spread_pct_p25": 1.3245033112582782,
+    "spread_pct_p75": 4.081632653061225,
+    "spread_pct_p90": 15.384615384615383,
+    "spread_pct_p95": 40.0,
+    "depth_count": 227760,
+    "depth_mean": 68705.63950175623,
+    "depth_median": 66718.11,
+    "depth_min": 1269.41,
+    "depth_max": 433339.92,
+    "depth_std": 38474.87733458374,
+    "depth_p25": 37793.432499999995,
+    "depth_p75": 97918.595,
+    "depth_p90": 119255.97,
+    "depth_p95": 133894.31949999998,
+    "imbalance_count": 227762,
+    "imbalance_mean": -0.013690276692336738,
+    "imbalance_median": -0.0121,
+    "imbalance_min": -1.0,
+    "imbalance_max": 1.0,
+    "imbalance_std": 0.4458025583641471,
+    "imbalance_p25": -0.3642,
+    "imbalance_p75": 0.3355,
+    "imbalance_p90": 0.5457699999999999,
+    "imbalance_p95": 0.672,
+    "prob_count": 227762,
+    "prob_mean": 0.5071203778505633,
+    "prob_median": 0.505,
+    "prob_min": 0.0,
+    "prob_max": 0.999,
+    "prob_std": 0.3131344876971085,
+    "prob_p25": 0.245,
+    "prob_p75": 0.775,
+    "prob_p90": 0.9549999999999998,
+    "prob_p95": 0.9850000000000001,
+    "overround_count": 227762,
+    "overround_mean": 0.009747148339055682,
+    "overround_median": 0.01,
+    "overround_min": -0.05,
+    "overround_max": 0.92,
+    "overround_std": 0.005786584258217764,
+    "overround_p25": 0.01,
+    "overround_p75": 0.01,
+    "overround_p90": 0.01,
+    "overround_p95": 0.01,
+    "latency_count": 227761,
+    "latency_mean": 188.40645808544923,
+    "latency_median": 178.0,
+    "latency_min": 145.3,
+    "latency_max": 32526.8,
+    "latency_std": 96.44326852040817,
+    "latency_p25": 160.3,
+    "latency_p75": 194.0,
+    "latency_p90": 234.5,
+    "latency_p95": 259.9,
+    "prob_zones": {
+      "danger": 29006,
+      "caution": 19625,
+      "safe": 36201,
+      "neutral": 142836
+    },
+    "prob_zones_pct": {
+      "danger": 12.735223610611076,
+      "caution": 8.616450505352079,
+      "safe": 15.894222916904488,
+      "neutral": 62.712831815667236
+    },
+    "hourly_stats": {
+      "0": {
+        "count": 7160,
+        "avg_depth": 46884.23884078212,
+        "avg_spread_pct": 7.4538257766859495
+      },
+      "1": {
+        "count": 7182,
+        "avg_depth": 52812.187733221945,
+        "avg_spread_pct": 2.692638092173312
+      },
+      "2": {
+        "count": 9663,
+        "avg_depth": 54555.06629721619,
+        "avg_spread_pct": 9.875261800815785
+      },
+      "3": {
+        "count": 10773,
+        "avg_depth": 59212.35363130047,
+        "avg_spread_pct": 5.481583875566731
+      },
+      "4": {
+        "count": 10774,
+        "avg_depth": 45941.02069240765,
+        "avg_spread_pct": 7.060442086085583
+      },
+      "5": {
+        "count": 10774,
+        "avg_depth": 43956.47660664563,
+        "avg_spread_pct": 9.126478059479211
+      },
+      "6": {
+        "count": 10771,
+        "avg_depth": 69702.59706990994,
+        "avg_spread_pct": 10.813775387946848
+      },
+      "7": {
+        "count": 10779,
+        "avg_depth": 75055.70702291492,
+        "avg_spread_pct": 7.806795139884667
+      },
+      "8": {
+        "count": 10773,
+        "avg_depth": 89642.11443330548,
+        "avg_spread_pct": 4.074087198213792
+      },
+      "9": {
+        "count": 10768,
+        "avg_depth": 81565.22878807578,
+        "avg_spread_pct": 5.236376600270062
+      },
+      "10": {
+        "count": 10772,
+        "avg_depth": 75974.82809598961,
+        "avg_spread_pct": 11.603153135273761
+      },
+      "11": {
+        "count": 10774,
+        "avg_depth": 78263.94703359941,
+        "avg_spread_pct": 5.711511827944315
+      },
+      "12": {
+        "count": 10769,
+        "avg_depth": 77247.3577741666,
+        "avg_spread_pct": 6.258360954869967
+      },
+      "13": {
+        "count": 10768,
+        "avg_depth": 82146.93348625557,
+        "avg_spread_pct": 4.529772920110165
+      },
+      "14": {
+        "count": 10708,
+        "avg_depth": 61112.26763052209,
+        "avg_spread_pct": 8.804052234797092
+      },
+      "15": {
+        "count": 10769,
+        "avg_depth": 72832.30778716686,
+        "avg_spread_pct": 6.396399577821802
+      },
+      "16": {
+        "count": 10768,
+        "avg_depth": 67202.36397102526,
+        "avg_spread_pct": 3.897973143702148
+      },
+      "17": {
+        "count": 9986,
+        "avg_depth": 67813.64670438613,
+        "avg_spread_pct": 8.361797740290859
+      },
+      "18": {
+        "count": 7173,
+        "avg_depth": 80917.00250383382,
+        "avg_spread_pct": 12.888001856628927
+      },
+      "19": {
+        "count": 7169,
+        "avg_depth": 90659.7165364765,
+        "avg_spread_pct": 5.192673472163936
+      },
+      "20": {
+        "count": 7173,
+        "avg_depth": 74301.66944924707,
+        "avg_spread_pct": 12.970826576043864
+      },
+      "21": {
+        "count": 7177,
+        "avg_depth": 73308.59851051972,
+        "avg_spread_pct": 6.784439877721885
+      },
+      "22": {
+        "count": 7167,
+        "avg_depth": 67869.50202595229,
+        "avg_spread_pct": 4.079894277836518
+      },
+      "23": {
+        "count": 7172,
+        "avg_depth": 56142.22765197992,
+        "avg_spread_pct": 12.84747918802663
+      }
+    }
+  },
+  "SOL15m": {
+    "market": "SOL15m",
+    "total_rows": 227780,
+    "total_windows": 255,
+    "spread_count": 216831,
+    "spread_mean": 0.010843730831846,
+    "spread_median": 0.01,
+    "spread_min": 0.001,
+    "spread_max": 0.91,
+    "spread_std": 0.00683004456199525,
+    "spread_p25": 0.01,
+    "spread_p75": 0.01,
+    "spread_p90": 0.017,
+    "spread_p95": 0.02,
+    "spread_pct_count": 216831,
+    "spread_pct_mean": 8.298188535019268,
+    "spread_pct_median": 2.105263157894737,
+    "spread_pct_min": 0.10015022533800699,
+    "spread_pct_max": 180.95238095238093,
+    "spread_pct_std": 18.44055297860041,
+    "spread_pct_p25": 1.360544217687075,
+    "spread_pct_p75": 4.444444444444445,
+    "spread_pct_p90": 22.222222222222225,
+    "spread_pct_p95": 46.15384615384615,
+    "depth_count": 227777,
+    "depth_mean": 45553.13480540177,
+    "depth_median": 40618.78999999999,
+    "depth_min": 936.36,
+    "depth_max": 366271.56,
+    "depth_std": 32781.90238938156,
+    "depth_p25": 15694.525,
+    "depth_p75": 72324.26999999999,
+    "depth_p90": 87033.95599999999,
+    "depth_p95": 108497.95300000001,
+    "imbalance_count": 227780,
+    "imbalance_mean": -0.0072459899903415574,
+    "imbalance_median": -0.0122,
+    "imbalance_min": -1.0,
+    "imbalance_max": 1.0,
+    "imbalance_std": 0.5517796027667228,
+    "imbalance_p25": -0.5191,
+    "imbalance_p75": 0.5084,
+    "imbalance_p90": 0.7247000000000001,
+    "imbalance_p95": 0.7893000000000001,
+    "prob_count": 227780,
+    "prob_mean": 0.513820807357977,
+    "prob_median": 0.515,
+    "prob_min": 0.0,
+    "prob_max": 0.999,
+    "prob_std": 0.3217623448140855,
+    "prob_p25": 0.245,
+    "prob_p75": 0.8,
+    "prob_p90": 0.9650000000000001,
+    "prob_p95": 0.9894999999999999,
+    "overround_count": 227780,
+    "overround_mean": 0.010320273948546843,
+    "overround_median": 0.01,
+    "overround_min": -0.16,
+    "overround_max": 0.91,
+    "overround_std": 0.007094337444726825,
+    "overround_p25": 0.01,
+    "overround_p75": 0.01,
+    "overround_p90": 0.009999999999999998,
+    "overround_p95": 0.02,
+    "latency_count": 227779,
+    "latency_mean": 188.40762361762935,
+    "latency_median": 178.0,
+    "latency_min": 145.3,
+    "latency_max": 32526.8,
+    "latency_std": 96.44376872698928,
+    "latency_p25": 160.3,
+    "latency_p75": 194.0,
+    "latency_p90": 234.5,
+    "latency_p95": 259.9,
+    "prob_zones": {
+      "danger": 33821,
+      "caution": 21708,
+      "safe": 35144,
+      "neutral": 136700
+    },
+    "prob_zones_pct": {
+      "danger": 14.848099042936166,
+      "caution": 9.53024848538063,
+      "safe": 15.428922644657126,
+      "neutral": 60.01404864342786
+    },
+    "hourly_stats": {
+      "0": {
+        "count": 7160,
+        "avg_depth": 25871.912698324024,
+        "avg_spread_pct": 13.003231077509392
+      },
+      "1": {
+        "count": 7182,
+        "avg_depth": 28605.870640490113,
+        "avg_spread_pct": 2.8744161104232404
+      },
+      "2": {
+        "count": 9663,
+        "avg_depth": 30461.56499120356,
+        "avg_spread_pct": 11.154359790761395
+      },
+      "3": {
+        "count": 10773,
+        "avg_depth": 33133.960358303164,
+        "avg_spread_pct": 4.801820765712908
+      },
+      "4": {
+        "count": 10774,
+        "avg_depth": 30502.98959625023,
+        "avg_spread_pct": 6.711563820007085
+      },
+      "5": {
+        "count": 10774,
+        "avg_depth": 27213.591905513273,
+        "avg_spread_pct": 9.175949572474732
+      },
+      "6": {
+        "count": 10771,
+        "avg_depth": 48844.25580447498,
+        "avg_spread_pct": 12.239257587593757
+      },
+      "7": {
+        "count": 10779,
+        "avg_depth": 50181.43407737267,
+        "avg_spread_pct": 10.635283519719192
+      },
+      "8": {
+        "count": 10773,
+        "avg_depth": 60829.88493270212,
+        "avg_spread_pct": 3.3316660176932174
+      },
+      "9": {
+        "count": 10768,
+        "avg_depth": 56862.300088224365,
+        "avg_spread_pct": 4.645553786398793
+      },
+      "10": {
+        "count": 10772,
+        "avg_depth": 48689.44720293353,
+        "avg_spread_pct": 15.860787122231708
+      },
+      "11": {
+        "count": 10774,
+        "avg_depth": 60446.28982457769,
+        "avg_spread_pct": 6.666198349539404
+      },
+      "12": {
+        "count": 10769,
+        "avg_depth": 56362.53289256198,
+        "avg_spread_pct": 5.521134172194096
+      },
+      "13": {
+        "count": 10768,
+        "avg_depth": 54342.22628343239,
+        "avg_spread_pct": 6.62156631948531
+      },
+      "14": {
+        "count": 10708,
+        "avg_depth": 38159.139768354195,
+        "avg_spread_pct": 9.770562494133715
+      },
+      "15": {
+        "count": 10769,
+        "avg_depth": 50951.230672300124,
+        "avg_spread_pct": 7.0927429580231625
+      },
+      "16": {
+        "count": 10768,
+        "avg_depth": 44502.975924962855,
+        "avg_spread_pct": 4.378700451347543
+      },
+      "17": {
+        "count": 10004,
+        "avg_depth": 49494.513362654936,
+        "avg_spread_pct": 10.258092933827188
+      },
+      "18": {
+        "count": 7173,
+        "avg_depth": 52435.274091732885,
+        "avg_spread_pct": 12.948599065658762
+      },
+      "19": {
+        "count": 7169,
+        "avg_depth": 63773.287413865255,
+        "avg_spread_pct": 6.3601843516388605
+      },
+      "20": {
+        "count": 7173,
+        "avg_depth": 49061.19489403235,
+        "avg_spread_pct": 9.254723601825072
+      },
+      "21": {
+        "count": 7177,
+        "avg_depth": 49107.56049463564,
+        "avg_spread_pct": 4.955966570999188
+      },
+      "22": {
+        "count": 7167,
+        "avg_depth": 43895.17737547091,
+        "avg_spread_pct": 4.76190213238234
+      },
+      "23": {
+        "count": 7172,
+        "avg_depth": 31491.10288901283,
+        "avg_spread_pct": 18.60028826298758
+      }
+    }
+  },
+  "XRP15m": {
+    "market": "XRP15m",
+    "total_rows": 227805,
+    "total_windows": 255,
+    "spread_count": 216103,
+    "spread_mean": 0.011733080984530525,
+    "spread_median": 0.01,
+    "spread_min": 0.001,
+    "spread_max": 0.93,
+    "spread_std": 0.009983264628065622,
+    "spread_p25": 0.01,
+    "spread_p75": 0.01,
+    "spread_p90": 0.02,
+    "spread_p95": 0.02,
+    "spread_pct_count": 216103,
+    "spread_pct_mean": 9.293618317433072,
+    "spread_pct_median": 2.2988505747126435,
+    "spread_pct_min": 0.10015022533800699,
+    "spread_pct_max": 189.4736842105263,
+    "spread_pct_std": 19.65970170886134,
+    "spread_pct_p25": 1.4388489208633095,
+    "spread_pct_p75": 5.555555555555556,
+    "spread_pct_p90": 25.0,
+    "spread_pct_p95": 57.14285714285713,
+    "depth_count": 227803,
+    "depth_mean": 33707.17448510336,
+    "depth_median": 21575.32,
+    "depth_min": 637.11,
+    "depth_max": 346057.15,
+    "depth_std": 29596.314603568335,
+    "depth_p25": 9593.970000000001,
+    "depth_p75": 56534.8,
+    "depth_p90": 72466.27599999998,
+    "depth_p95": 92809.852,
+    "imbalance_count": 227805,
+    "imbalance_mean": -0.01024684884001668,
+    "imbalance_median": -0.0069,
+    "imbalance_min": -1.0,
+    "imbalance_max": 1.0,
+    "imbalance_std": 0.6042733412028377,
+    "imbalance_p25": -0.5525,
+    "imbalance_p75": 0.5205,
+    "imbalance_p90": 0.8336,
+    "imbalance_p95": 0.8766000000000002,
+    "prob_count": 227805,
+    "prob_mean": 0.49531237681350276,
+    "prob_median": 0.495,
+    "prob_min": 0.0,
+    "prob_max": 0.999,
+    "prob_std": 0.32605893613274944,
+    "prob_p25": 0.205,
+    "prob_p75": 0.785,
+    "prob_p90": 0.9650000000000001,
+    "prob_p95": 0.9875,
+    "overround_count": 227805,
+    "overround_mean": 0.011129983977524637,
+    "overround_median": 0.01,
+    "overround_min": -0.09,
+    "overround_max": 0.93,
+    "overround_std": 0.010142333541190986,
+    "overround_p25": 0.01,
+    "overround_p75": 0.01,
+    "overround_p90": 0.02,
+    "overround_p95": 0.02,
+    "latency_count": 227804,
+    "latency_mean": 188.41027198820038,
+    "latency_median": 178.0,
+    "latency_min": 145.3,
+    "latency_max": 32526.8,
+    "latency_std": 96.44252474550848,
+    "latency_p25": 160.3,
+    "latency_p75": 194.0,
+    "latency_p90": 234.5,
+    "latency_p95": 259.9,
+    "prob_zones": {
+      "danger": 33448,
+      "caution": 22827,
+      "safe": 38847,
+      "neutral": 132143
+    },
+    "prob_zones_pct": {
+      "danger": 14.682733039222143,
+      "caution": 10.020412194640153,
+      "safe": 17.05274247711859,
+      "neutral": 58.0070674480367
+    },
+    "hourly_stats": {
+      "0": {
+        "count": 7160,
+        "avg_depth": 24301.326723463688,
+        "avg_spread_pct": 10.7451944085597
+      },
+      "1": {
+        "count": 7182,
+        "avg_depth": 24429.44350459482,
+        "avg_spread_pct": 4.300775289382822
+      },
+      "2": {
+        "count": 9663,
+        "avg_depth": 22452.47485253027,
+        "avg_spread_pct": 14.075255470957126
+      },
+      "3": {
+        "count": 10773,
+        "avg_depth": 24690.702691914972,
+        "avg_spread_pct": 6.537042625979917
+      },
+      "4": {
+        "count": 10774,
+        "avg_depth": 23843.494074624094,
+        "avg_spread_pct": 7.532258022048012
+      },
+      "5": {
+        "count": 10774,
+        "avg_depth": 22758.57940040839,
+        "avg_spread_pct": 9.49304101919578
+      },
+      "6": {
+        "count": 10771,
+        "avg_depth": 38254.55779036301,
+        "avg_spread_pct": 12.421855798373379
+      },
+      "7": {
+        "count": 10779,
+        "avg_depth": 42660.11225809444,
+        "avg_spread_pct": 10.39404506850007
+      },
+      "8": {
+        "count": 10773,
+        "avg_depth": 37673.315400538384,
+        "avg_spread_pct": 4.163750221075876
+      },
+      "9": {
+        "count": 10768,
+        "avg_depth": 36580.18948179792,
+        "avg_spread_pct": 9.249689703379179
+      },
+      "10": {
+        "count": 10772,
+        "avg_depth": 31391.40083085778,
+        "avg_spread_pct": 15.238236456142129
+      },
+      "11": {
+        "count": 10774,
+        "avg_depth": 37699.45026081307,
+        "avg_spread_pct": 8.486968494173007
+      },
+      "12": {
+        "count": 10769,
+        "avg_depth": 35534.70791345529,
+        "avg_spread_pct": 4.750197657545629
+      },
+      "13": {
+        "count": 10768,
+        "avg_depth": 32354.705601783062,
+        "avg_spread_pct": 8.519008904545464
+      },
+      "14": {
+        "count": 10708,
+        "avg_depth": 21478.734309330346,
+        "avg_spread_pct": 10.50893481992836
+      },
+      "15": {
+        "count": 10769,
+        "avg_depth": 30315.58307920884,
+        "avg_spread_pct": 9.65508234187523
+      },
+      "16": {
+        "count": 10768,
+        "avg_depth": 41038.39756315007,
+        "avg_spread_pct": 5.369516709530179
+      },
+      "17": {
+        "count": 10029,
+        "avg_depth": 46901.47251271313,
+        "avg_spread_pct": 9.81693864481725
+      },
+      "18": {
+        "count": 7173,
+        "avg_depth": 43273.42165202844,
+        "avg_spread_pct": 15.347543941713639
+      },
+      "19": {
+        "count": 7169,
+        "avg_depth": 47471.98603849909,
+        "avg_spread_pct": 11.62419025069395
+      },
+      "20": {
+        "count": 7173,
+        "avg_depth": 42081.524592861126,
+        "avg_spread_pct": 12.56489186021491
+      },
+      "21": {
+        "count": 7177,
+        "avg_depth": 45328.06563605963,
+        "avg_spread_pct": 8.29395265442508
+      },
+      "22": {
+        "count": 7167,
+        "avg_depth": 33212.382969164224,
+        "avg_spread_pct": 3.645850166421864
+      },
+      "23": {
+        "count": 7172,
+        "avg_depth": 29626.844694645846,
+        "avg_spread_pct": 12.313604102973873
+      }
+    }
+  }
+}
