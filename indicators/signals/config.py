@@ -21,11 +21,13 @@ class SignalConfig:
 
     # === SPREAD GATE ===
     # Maximum spread as percentage of mid price
-    max_spread_pct: float = float(os.getenv("SIGNAL_MAX_SPREAD_PCT", "0.02"))  # 2%
+    # Dados reais: mediana ~9.5%, então 10% permite maioria dos trades
+    max_spread_pct: float = float(os.getenv("SIGNAL_MAX_SPREAD_PCT", "0.10"))  # 10%
 
     # === STABILITY GATE ===
     # Maximum volatility (annualized) from Binance
-    max_volatility: float = float(os.getenv("SIGNAL_MAX_VOL", "0.50"))  # 50%
+    # Dados reais: média ~111% (crypto é volátil!), então 100% é razoável
+    max_volatility: float = float(os.getenv("SIGNAL_MAX_VOL", "1.00"))  # 100%
     # Or use regime: block if "muito_alta"
     block_high_vol_regime: bool = True
 
