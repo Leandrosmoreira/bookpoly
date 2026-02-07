@@ -414,8 +414,36 @@ async def run_paper_trading(coins: list[str], verbose: bool = False):
                     config=decision_config,
                 )
 
-                # Log decision details if verbose
-                if verbose and gate_result.all_passed:
+                # Log detailed status every second (verbose mode)
+                if verbose:
+                    # Format gates status
+                    gates_status = []
+                    gates_status.append(f"T:{'✓' if gate_result.time_gate else '✗'}")
+                    gates_status.append(f"L:{'✓' if gate_result.liquidity_gate else '✗'}")
+                    gates_status.append(f"S:{'✓' if gate_result.spread_gate else '✗'}")
+                    gates_status.append(f"V:{'✓' if gate_result.stability_gate else '✗'}")
+                    gates_status.append(f"N:{'✓' if gate_result.latency_gate else '✗'}")
+                    gates_all = "✓" if gate_result.all_passed else "✗"
+                    
+                    # Get key parameters (yes_data já foi definido antes)
+                    spread_pct = (yes_data.get("spread", 0) / yes_data.get("mid", 1)) * 100 if yes_data.get("mid", 0) > 0 else 0
+                    depth = (yes_data.get("bid_depth", 0) or 0) + (yes_data.get("ask_depth", 0) or 0)
+                    latency = poly_data.get("fetch", {}).get("latency_ms", 0)
+                    
+                    # Format decision
+                    action_emoji = "★" if decision.action == Action.ENTER else "○"
+                    action_text = decision.action.value if decision.action != Action.ENTER else f"ENTER {decision.side.value}"
+                    
+                    vol_str = f"{rv_5m*100:.0f}%" if rv_5m else "N/A"
+                    log.info(
+                        f"[{market}] [{''.join(gates_status)}] ALL:{gates_all} | "
+                        f"prob={prob_up:.1%} zone={zone} score={score_result.score:.2f} | "
+                        f"spread={spread_pct:.1f}% depth=${depth:.0f} vol={vol_str} | "
+                        f"persist={state.persistence_s:.0f}s remain={gate_result.time_remaining_s:.0f}s | "
+                        f"{action_emoji} {action_text}"
+                    )
+                elif gate_result.all_passed:
+                    # Non-verbose: only log when gates pass
                     log.info(
                         f"[{market}] Gates:OK prob={prob_up:.1%} zone={zone} "
                         f"score={score_result.score:.2f} persist={state.persistence_s:.0f}s "
@@ -427,8 +455,7 @@ async def run_paper_trading(coins: list[str], verbose: bool = False):
                     # Check portfolio limits
                     can_trade, reason = portfolio.can_trade()
                     if not can_trade:
-                        if verbose:
-                            log.info(f"[{market}] BLOCKED: {reason}")
+                        log.info(f"[{market}] ⛔ BLOCKED: {reason}")
                         continue
 
                     # Calculate entry price
