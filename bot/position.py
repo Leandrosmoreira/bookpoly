@@ -1,11 +1,10 @@
 """
 Position and size management.
 
-Handles position sizing using Kelly criterion and risk limits.
+Uses Fixed Risk sizing (simpler and more predictable than Kelly).
 """
 
-import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from config import BotConfig
@@ -40,16 +39,17 @@ class PositionManager:
     """
     Manages position sizing and tracks P&L.
 
-    Uses Kelly criterion for optimal sizing with configurable fraction.
+    Uses Fixed Risk: always bet the minimum lot size ($5).
+    Simple and predictable for testing.
     """
 
-    def __init__(self, config: BotConfig, initial_bankroll: float = 1000.0):
+    def __init__(self, config: BotConfig, initial_bankroll: float = 100.0):
         """
         Initialize position manager.
 
         Args:
             config: Bot configuration
-            initial_bankroll: Starting capital
+            initial_bankroll: Starting capital (default $100 for testing)
         """
         self.config = config
         self.initial_bankroll = initial_bankroll
@@ -77,47 +77,6 @@ class PositionManager:
             if today not in self.daily_stats:
                 self.daily_stats[today] = DailyStats(date=today)
 
-    def calculate_kelly_size(
-        self,
-        win_prob: float,
-        win_payout: float,
-        loss_amount: float,
-    ) -> float:
-        """
-        Calculate optimal position size using Kelly criterion.
-
-        Kelly formula: f* = (bp - q) / b
-        where:
-            f* = fraction of bankroll to bet
-            b = odds received on the bet (win_payout / loss_amount)
-            p = probability of winning
-            q = probability of losing (1 - p)
-
-        Args:
-            win_prob: Probability of winning
-            win_payout: Amount won if successful
-            loss_amount: Amount lost if unsuccessful
-
-        Returns:
-            Optimal fraction of bankroll to bet
-        """
-        if loss_amount == 0:
-            return 0.0
-
-        b = win_payout / loss_amount
-        p = win_prob
-        q = 1 - p
-
-        kelly = (b * p - q) / b
-
-        # Apply Kelly fraction (e.g., 0.25 = quarter Kelly)
-        kelly *= self.config.kelly_fraction
-
-        # Clamp to reasonable range
-        kelly = max(0, min(kelly, self.config.max_risk_per_trade))
-
-        return kelly
-
     def calculate_position_size(
         self,
         entry_price: float,
@@ -127,41 +86,61 @@ class PositionManager:
         """
         Calculate position size for a trade.
 
+        Uses FIXED SIZE strategy:
+        - Always use minimum lot size ($5)
+        - Simple and predictable for testing
+
         Args:
             entry_price: Price to enter at
-            score: Signal score (0-1)
-            confidence: Confidence level (high, medium, low)
+            score: Signal score (0-1) - not used in fixed sizing
+            confidence: Confidence level - not used in fixed sizing
 
         Returns:
             Number of shares to trade
         """
-        # Estimate win probability from score
-        # Score of 0.5 = 50% win rate, 1.0 = ~70% win rate
-        win_prob = 0.5 + (score - 0.5) * 0.4  # Maps 0.5-1.0 to 0.5-0.7
+        # Fixed size: always use minimum position ($5)
+        # This is the Polymarket minimum lot
+        fixed_dollar_amount = self.config.min_position_size  # $5
 
-        # Calculate potential payout
-        win_payout = 1.0 - entry_price  # If we win, we get $1 - entry_price
-        loss_amount = entry_price  # If we lose, we lose entry_price
+        # Check if we have enough bankroll
+        if self.current_bankroll < fixed_dollar_amount:
+            return 0.0
 
-        # Get Kelly fraction
-        kelly = self.calculate_kelly_size(win_prob, win_payout, loss_amount)
+        # Convert dollars to shares
+        # If entry_price is $0.85, then $5 buys ~5.88 shares
+        shares = fixed_dollar_amount / entry_price if entry_price > 0 else 0
 
-        # Calculate dollar amount
-        dollar_amount = self.current_bankroll * kelly
+        return round(shares, 2)
 
-        # Convert to shares (at entry_price per share)
+    def calculate_position_size_percentage(
+        self,
+        entry_price: float,
+        risk_pct: float = 0.05,
+    ) -> float:
+        """
+        Calculate position size based on percentage of bankroll.
+
+        Alternative method: risk X% of bankroll per trade.
+
+        Args:
+            entry_price: Price to enter at
+            risk_pct: Percentage of bankroll to risk (default 5%)
+
+        Returns:
+            Number of shares to trade
+        """
+        # Calculate dollar amount to risk
+        dollar_amount = self.current_bankroll * risk_pct
+
+        # Respect minimum lot size
+        dollar_amount = max(dollar_amount, self.config.min_position_size)
+
+        # Check if we have enough
+        if self.current_bankroll < dollar_amount:
+            return 0.0
+
+        # Convert to shares
         shares = dollar_amount / entry_price if entry_price > 0 else 0
-
-        # Apply confidence multiplier
-        if confidence == "high":
-            shares *= 1.0
-        elif confidence == "medium":
-            shares *= 0.7
-        else:  # low
-            shares *= 0.4
-
-        # Clamp to limits
-        shares = max(self.config.min_position_size, min(shares, self.config.max_position_size))
 
         return round(shares, 2)
 
@@ -184,9 +163,9 @@ class PositionManager:
         if stats.pnl <= -self.config.max_daily_loss:
             return False, f"Daily loss limit reached (${stats.pnl:.2f})"
 
-        # Check bankroll
-        if self.current_bankroll <= 0:
-            return False, "Bankroll depleted"
+        # Check bankroll - need at least minimum lot
+        if self.current_bankroll < self.config.min_position_size:
+            return False, f"Bankroll too low (${self.current_bankroll:.2f} < ${self.config.min_position_size})"
 
         return True, "OK"
 
@@ -212,6 +191,9 @@ class PositionManager:
             TradeRecord
         """
         self._ensure_daily_stats()
+
+        # Calculate cost
+        cost = size * entry_price
 
         trade = TradeRecord(
             timestamp=int(datetime.now(timezone.utc).timestamp() * 1000),
@@ -255,10 +237,15 @@ class PositionManager:
         trade.status = "closed"
 
         # Calculate P&L
+        # If we bet on UP and outcome is UP, we win
+        # If we bet on DOWN and outcome is DOWN, we win
         won = (trade.side == outcome)
+
         if won:
+            # Win: we get $1 per share, minus what we paid
             trade.pnl = trade.size * (1.0 - trade.entry_price)
         else:
+            # Loss: we lose what we paid
             trade.pnl = -trade.size * trade.entry_price
 
         # Update bankroll
@@ -303,12 +290,12 @@ class PositionManager:
         self._ensure_daily_stats()
         stats = self.daily_stats[self._current_date]
 
+        win_rate = stats.wins / stats.trades * 100 if stats.trades > 0 else 0
+
         return (
-            f"Date: {stats.date} | "
             f"Trades: {stats.trades} | "
-            f"Wins: {stats.wins} | "
-            f"Losses: {stats.losses} | "
-            f"P&L: ${stats.pnl:.2f} | "
+            f"W/L: {stats.wins}/{stats.losses} ({win_rate:.0f}%) | "
+            f"P&L: ${stats.pnl:+.2f} | "
             f"Bankroll: ${self.current_bankroll:.2f}"
         )
 

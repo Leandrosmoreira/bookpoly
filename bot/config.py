@@ -23,17 +23,14 @@ class BotConfig:
     wallet_address: str = ""
 
     # Trading parameters
-    max_position_size: float = 10.0  # Maximum shares per position
-    min_position_size: float = 1.0   # Minimum shares per trade
-    max_daily_trades: int = 50       # Maximum trades per day
-    max_daily_loss: float = 50.0     # Stop trading if loss exceeds this
-
-    # Risk parameters
-    kelly_fraction: float = 0.25     # Fraction of Kelly criterion to use
-    max_risk_per_trade: float = 0.02 # Maximum 2% of bankroll per trade
+    initial_bankroll: float = 100.0  # Starting capital for testing
+    max_position_size: float = 10.0  # Maximum $ per position
+    min_position_size: float = 5.0   # Minimum $ per trade (Polymarket minimum)
+    max_daily_trades: int = 20       # Maximum trades per day
+    max_daily_loss: float = 25.0     # Stop trading if loss exceeds this (25% of bankroll)
 
     # Execution parameters
-    slippage_tolerance: float = 0.01  # 1% max slippage
+    slippage_tolerance: float = 0.02  # 2% max slippage
     order_timeout_s: float = 5.0      # Cancel order after N seconds
 
     # Mode
@@ -47,14 +44,11 @@ class BotConfig:
         self.wallet_address = os.getenv("POLYMARKET_WALLET", "")
 
         # Parse trading params
+        self.initial_bankroll = float(os.getenv("BOT_BANKROLL", "100.0"))
         self.max_position_size = float(os.getenv("BOT_MAX_POSITION", "10.0"))
-        self.min_position_size = float(os.getenv("BOT_MIN_POSITION", "1.0"))
-        self.max_daily_trades = int(os.getenv("BOT_MAX_DAILY_TRADES", "50"))
-        self.max_daily_loss = float(os.getenv("BOT_MAX_DAILY_LOSS", "50.0"))
-
-        # Parse risk params
-        self.kelly_fraction = float(os.getenv("BOT_KELLY_FRACTION", "0.25"))
-        self.max_risk_per_trade = float(os.getenv("BOT_MAX_RISK", "0.02"))
+        self.min_position_size = float(os.getenv("BOT_MIN_POSITION", "5.0"))
+        self.max_daily_trades = int(os.getenv("BOT_MAX_DAILY_TRADES", "20"))
+        self.max_daily_loss = float(os.getenv("BOT_MAX_DAILY_LOSS", "25.0"))
 
         # Parse mode
         self.paper_trading = os.getenv("BOT_PAPER_TRADING", "true").lower() == "true"
@@ -77,14 +71,14 @@ class BotConfig:
             if not self.wallet_address:
                 errors.append("POLYMARKET_WALLET is required for live trading")
 
-        if self.max_position_size <= 0:
-            errors.append("max_position_size must be positive")
+        if self.initial_bankroll <= 0:
+            errors.append("initial_bankroll must be positive")
 
-        if self.kelly_fraction <= 0 or self.kelly_fraction > 1:
-            errors.append("kelly_fraction must be between 0 and 1")
+        if self.min_position_size < 5.0:
+            errors.append("min_position_size must be at least $5 (Polymarket minimum)")
 
-        if self.max_risk_per_trade <= 0 or self.max_risk_per_trade > 0.1:
-            errors.append("max_risk_per_trade must be between 0 and 0.1 (10%)")
+        if self.max_position_size < self.min_position_size:
+            errors.append("max_position_size must be >= min_position_size")
 
         return errors
 
@@ -92,7 +86,6 @@ class BotConfig:
         mode = "DRY_RUN" if self.dry_run else ("PAPER" if self.paper_trading else "LIVE")
         return (
             f"BotConfig(mode={mode}, "
-            f"max_pos={self.max_position_size}, "
-            f"kelly={self.kelly_fraction}, "
-            f"max_risk={self.max_risk_per_trade:.1%})"
+            f"bankroll=${self.initial_bankroll:.0f}, "
+            f"lot=${self.min_position_size:.0f}-${self.max_position_size:.0f})"
         )
