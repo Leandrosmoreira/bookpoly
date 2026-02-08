@@ -39,114 +39,176 @@ class ClaimScanner:
         """
         Scan for all claimable positions.
 
+        Uses the Data API with redeemable=true filter for efficiency.
         Returns list of ClaimItem objects ready for claiming.
         """
         try:
-            # 1. Get user positions
-            positions = await self._get_user_positions()
+            # Get redeemable positions directly from API
+            # This is more efficient than fetching all and filtering
+            positions = await self._get_redeemable_positions()
+
             if not positions:
-                log.debug("No open positions found")
+                log.debug("No redeemable positions found")
                 return []
 
-            log.info(f"Found {len(positions)} positions to check")
+            log.info(f"Found {len(positions)} redeemable positions from API")
 
-            # 2. Get resolved markets
-            resolved_markets = await self._get_resolved_markets()
-            resolved_ids = {m["condition_id"] for m in resolved_markets}
-
-            if not resolved_ids:
-                log.debug("No resolved markets found")
-                return []
-
-            log.info(f"Found {len(resolved_ids)} resolved markets")
-
-            # 3. Filter positions in resolved markets
+            # Convert to ClaimItems
             claimables = []
             for pos in positions:
-                condition_id = pos.get("condition_id") or pos.get("market_id")
-
-                if condition_id not in resolved_ids:
-                    continue
-
-                # Find the resolved market info
-                market_info = next(
-                    (m for m in resolved_markets if m["condition_id"] == condition_id),
-                    None
-                )
-
-                if not market_info:
-                    continue
-
-                # Check if enough time has passed since resolution
-                resolved_at = market_info.get("resolved_at", 0)
-                if time.time() - resolved_at < self.config.wait_after_resolution_s:
-                    log.debug(
-                        f"Market {condition_id} resolved too recently, "
-                        f"waiting {self.config.wait_after_resolution_s}s"
-                    )
-                    continue
-
-                # Create ClaimItem
-                claim_item = self._create_claim_item(pos, market_info)
+                claim_item = self._create_claim_item_from_data_api(pos)
                 if claim_item:
                     claimables.append(claim_item)
+                    log.info(
+                        f"  -> {claim_item.market_slug}: {claim_item.shares:.2f} shares "
+                        f"({claim_item.side}) - ${claim_item.total_payout:.2f}"
+                    )
 
-            log.info(f"Found {len(claimables)} claimable positions")
+            log.info(f"Total {len(claimables)} claimable positions ready")
             return claimables
 
         except Exception as e:
             log.error(f"Error scanning for claimables: {e}")
             return []
 
+    def _create_claim_item_from_data_api(self, pos: dict) -> Optional[ClaimItem]:
+        """
+        Create ClaimItem from Data API response format.
+
+        Data API response format:
+        {
+            "conditionId": "0x...",
+            "title": "Will BTC price...",
+            "slug": "btc-15m-...",
+            "outcome": "Yes",
+            "size": 25.0,
+            "avgPrice": 0.95,
+            "currentValue": 25.0,
+            "cashPnl": 1.25,
+            "redeemable": true,
+            "asset": "...",
+            "proxyWallet": "0x..."
+        }
+        """
+        try:
+            # Extract fields from Data API format
+            condition_id = pos.get("conditionId", "")
+            market_slug = pos.get("slug", "")
+            title = pos.get("title", "")
+            outcome = pos.get("outcome", "")
+            asset = pos.get("asset", "")  # token_id
+
+            shares = float(pos.get("size", 0))
+            avg_price = float(pos.get("avgPrice", 0))
+            current_value = float(pos.get("currentValue", 0))
+            cash_pnl = float(pos.get("cashPnl", 0))
+
+            if shares <= 0:
+                return None
+
+            # Generate unique claim_id
+            claim_id = self._generate_claim_id(asset, condition_id, self.config.funder)
+
+            # Determine side from outcome
+            outcome_lower = outcome.lower()
+            if "yes" in outcome_lower or "up" in outcome_lower:
+                side = "UP"
+            elif "no" in outcome_lower or "down" in outcome_lower:
+                side = "DOWN"
+            else:
+                side = outcome.upper()
+
+            # Redeemable positions are always winners (they have value)
+            won = True
+            payout_per_share = 1.0
+            total_payout = shares * payout_per_share
+
+            return ClaimItem(
+                claim_id=claim_id,
+                market_id=condition_id,
+                market_slug=market_slug,
+                token_id=asset,
+                shares=shares,
+                entry_price=avg_price,
+                won=won,
+                payout_per_share=payout_per_share,
+                total_payout=total_payout,
+                resolved_at=int(time.time()),  # API doesn't provide this
+                claim_type=ClaimType.REDEEM_WINNINGS,
+                side=side,
+            )
+
+        except Exception as e:
+            log.error(f"Error creating ClaimItem from Data API: {e}")
+            return None
+
     async def _get_user_positions(self) -> list[dict]:
         """
-        Get user's open positions from Polymarket.
+        Get user's open positions from Polymarket Data API.
 
-        Uses the CLOB API /positions endpoint or equivalent.
+        Uses the official Data API endpoint:
+        https://data-api.polymarket.com/positions
+
+        Docs: https://docs.polymarket.com/developers/misc-endpoints/data-api-get-positions
         """
         if not self.config.funder:
             log.error("No funder address configured")
             return []
 
         try:
-            # Try to get positions from CLOB API
-            # Note: This endpoint may require authentication
-            url = f"{self.config.clob_base_url}/positions"
-            params = {"user": self.config.funder}
+            # Use the official Data API endpoint
+            url = "https://data-api.polymarket.com/positions"
+            params = {
+                "user": self.config.funder,
+                "sizeThreshold": "0.01",  # Include small positions
+                "limit": "500",
+            }
 
-            headers = self._get_auth_headers("GET", "/positions")
-
-            resp = await self.client.get(url, params=params, headers=headers)
+            resp = await self.client.get(url, params=params)
 
             if resp.status_code == 200:
-                return resp.json()
+                positions = resp.json()
+                log.info(f"Data API returned {len(positions)} positions")
+                return positions
 
-            # If CLOB fails, try Gamma API
-            log.warning(f"CLOB positions failed ({resp.status_code}), trying Gamma")
-            return await self._get_positions_from_gamma()
+            log.error(f"Data API positions failed: {resp.status_code} - {resp.text}")
+            return []
 
         except Exception as e:
             log.error(f"Error getting positions: {e}")
             return []
 
-    async def _get_positions_from_gamma(self) -> list[dict]:
+    async def _get_redeemable_positions(self) -> list[dict]:
         """
-        Get positions from Gamma API as fallback.
+        Get only redeemable (claimable) positions directly from API.
+
+        This is more efficient as it filters server-side.
         """
+        if not self.config.funder:
+            log.error("No funder address configured")
+            return []
+
         try:
-            url = f"{self.config.gamma_base_url}/positions"
-            params = {"user": self.config.funder}
+            url = "https://data-api.polymarket.com/positions"
+            params = {
+                "user": self.config.funder,
+                "redeemable": "true",  # Only get claimable positions
+                "sizeThreshold": "0.01",
+                "limit": "500",
+            }
 
             resp = await self.client.get(url, params=params)
 
             if resp.status_code == 200:
-                return resp.json()
+                positions = resp.json()
+                log.info(f"Found {len(positions)} redeemable positions")
+                return positions
 
-            log.error(f"Gamma positions failed: {resp.status_code}")
+            log.error(f"Redeemable positions failed: {resp.status_code}")
             return []
 
         except Exception as e:
-            log.error(f"Error getting positions from Gamma: {e}")
+            log.error(f"Error getting redeemable positions: {e}")
             return []
 
     async def _get_resolved_markets(self) -> list[dict]:
