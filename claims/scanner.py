@@ -80,14 +80,16 @@ class ClaimScanner:
             "conditionId": "0x...",
             "title": "Will BTC price...",
             "slug": "btc-15m-...",
-            "outcome": "Yes",
+            "outcome": "Up",
+            "outcomeIndex": 0,
             "size": 25.0,
             "avgPrice": 0.95,
             "currentValue": 25.0,
             "cashPnl": 1.25,
             "redeemable": true,
             "asset": "...",
-            "proxyWallet": "0x..."
+            "proxyWallet": "0x...",
+            "negativeRisk": false
         }
         """
         try:
@@ -97,6 +99,8 @@ class ClaimScanner:
             title = pos.get("title", "")
             outcome = pos.get("outcome", "")
             asset = pos.get("asset", "")  # token_id
+            outcome_index = pos.get("outcomeIndex", 0)
+            neg_risk = pos.get("negativeRisk", False)
 
             shares = float(pos.get("size", 0))
             avg_price = float(pos.get("avgPrice", 0))
@@ -136,6 +140,8 @@ class ClaimScanner:
                 resolved_at=int(time.time()),  # API doesn't provide this
                 claim_type=ClaimType.REDEEM_WINNINGS,
                 side=side,
+                outcome_index=outcome_index,
+                neg_risk=neg_risk,
             )
 
         except Exception as e:

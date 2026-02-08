@@ -56,6 +56,10 @@ class ClaimItem:
     claim_type: ClaimType = ClaimType.REDEEM_WINNINGS
     side: str = ""  # "UP" or "DOWN"
 
+    # For on-chain redemption
+    outcome_index: int = 0  # 0 for first outcome (Up/Yes), 1 for second (Down/No)
+    neg_risk: bool = False  # Whether market uses neg risk
+
     @property
     def expected_profit(self) -> float:
         """Expected profit from this claim (before fees)."""
