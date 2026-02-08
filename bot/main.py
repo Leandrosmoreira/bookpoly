@@ -26,10 +26,10 @@ from datetime import datetime, timezone
 sys.path.insert(0, str(Path(__file__).parent.parent))
 sys.path.insert(0, str(Path(__file__).parent.parent / "indicators" / "signals"))
 
-from config import BotConfig
-from trader import PolymarketTrader, OrderSide
-from position import PositionManager
-from risk import RiskManager, RiskLimits
+from bot.config import BotConfig
+from bot.trader import PolymarketTrader, OrderSide
+from bot.position import PositionManager
+from bot.risk import RiskManager, RiskLimits
 
 from indicators.signals.config import SignalConfig
 from indicators.signals.gates import evaluate_gates, get_probability_zone

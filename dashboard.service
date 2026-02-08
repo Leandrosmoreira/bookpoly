@@ -1,0 +1,19 @@
+[Unit]
+Description=BookPoly Dashboard Web Server
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/bookpoly
+Environment="PATH=/root/bookpoly/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+ExecStart=/root/bookpoly/venv/bin/python /root/bookpoly/dashboard/app.py
+Environment="FLASK_PORT=5001"
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+

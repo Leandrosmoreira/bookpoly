@@ -1,0 +1,22 @@
+[Unit]
+Description=BookPoly Trading Bot (Main with Defense)
+After=network.target bookpoly-recorder.service volatility-recorder.service signals-recorder.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/bookpoly
+Environment="PATH=/root/bookpoly/venv/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="DEFENSE_ENABLED=true"
+Environment="SIGNAL_COINS=btc,eth,sol,xrp"
+Environment="BOT_PAPER_TRADING=true"
+Environment="BOT_DRY_RUN=false"
+ExecStart=/root/bookpoly/venv/bin/python -m bot.main --paper
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+

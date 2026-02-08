@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional
 
-from config import BotConfig
+from bot.config import BotConfig
 
 # Import defense module (for type hints and usage)
 import sys

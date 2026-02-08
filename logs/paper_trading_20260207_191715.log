@@ -1,0 +1,40 @@
+19:17:15 INFO  | ============================================================
+19:17:15 INFO  | 📈 PAPER TRADING BOT
+19:17:15 INFO  | ============================================================
+19:17:15 INFO  | Coins: BTC, ETH, SOL, XRP
+19:17:15 INFO  | Data: /root/bookpoly/data/raw/books
+19:17:15 INFO  | 
+19:17:15 INFO  | Parâmetros (docs/LOGICA_BOT.md):
+19:17:15 INFO  |   Bankroll: $100
+19:17:15 INFO  |   Size/trade: $5 (fixo)
+19:17:15 INFO  |   Max trades/dia: 20
+19:17:15 INFO  |   Max perda/dia: $25
+19:17:15 INFO  |   Max posições: 3
+19:17:15 INFO  |   Time Gate: 30s-240s
+19:17:15 INFO  |   Spread Gate: ≤10%
+19:17:15 INFO  |   Volatility Gate: ≤100%
+19:17:15 INFO  |   Min Depth: $300
+19:17:15 INFO  |   Forced Entry: prob≥95% + ≤2min
+19:17:15 INFO  | ============================================================
+19:17:15 INFO  | 
+19:17:15 INFO  | ============================================================
+19:17:15 INFO  | 📊 FINAL SUMMARY
+19:17:15 INFO  | ============================================================
+19:17:15 INFO  | Balance: $100.00 | Open: 0 | Trades: 0 (W:0/L:0) | Win Rate: 0% | PnL: $+0.00 | ROI: +0.0%
+19:17:15 INFO  | ============================================================
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/root/bookpoly/bot/paper_trading.py", line 603, in <module>
+    main()
+    ~~~~^^
+  File "/root/bookpoly/bot/paper_trading.py", line 594, in main
+    loop.run_until_complete(run_paper_trading(coins, args.verbose))
+    ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.13/asyncio/base_events.py", line 725, in run_until_complete
+    return future.result()
+           ~~~~~~~~~~~~~^^
+  File "/root/bookpoly/bot/paper_trading.py", line 340, in run_paper_trading
+    if binance_data:
+       ^^^^^^^^^^^^
+UnboundLocalError: cannot access local variable 'binance_data' where it is not associated with a value

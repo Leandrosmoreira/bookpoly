@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from collections import deque
 
-from config import BotConfig
+from bot.config import BotConfig
 
 
 @dataclass

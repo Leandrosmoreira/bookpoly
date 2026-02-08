@@ -15,7 +15,7 @@ from typing import Any
 
 import aiohttp
 
-from config import BotConfig
+from bot.config import BotConfig
 
 
 class OrderSide(Enum):
