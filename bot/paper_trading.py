@@ -32,6 +32,10 @@ from indicators.signals.state import StateTracker
 from indicators.signals.scorer import compute_score
 from indicators.signals.decision import decide, Action, DecisionConfig
 
+# Reversal detection
+from indicators.binance_realtime.reversal_detector import ReversalDetector
+from indicators.binance_realtime.config import BinanceRealtimeConfig
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)-5s | %(message)s",
@@ -307,6 +311,14 @@ async def run_paper_trading(coins: list[str], verbose: bool = False):
     # Track entry prob to determine outcome (fallback)
     entry_probs: dict[str, float] = {}  # market -> prob_up at entry
 
+    # Initialize reversal detectors for each coin
+    reversal_config = BinanceRealtimeConfig()
+    reversal_detectors: dict[str, ReversalDetector] = {}
+    for coin in coins:
+        symbol = f"{coin.upper()}USDT"
+        reversal_detectors[symbol] = ReversalDetector(reversal_config)
+    log.info(f"  Reversal Detection: ENABLED (threshold=0.70)")
+
     seq = 0
     last_status_time = time.time()
 
@@ -335,11 +347,32 @@ async def run_paper_trading(coins: list[str], verbose: bool = False):
 
                 window_start = poly_data.get("window_start", 0)
 
+                # Get Binance data FIRST (fix bug: was used before defined)
+                symbol = f"{coin.upper()}USDT"
+                binance_pattern = f"{symbol}_volatility_*.jsonl"
+                binance_data = get_latest_jsonl_row(binance_dir, binance_pattern)
+
                 # Get current BTC price from Binance
                 current_btc_price = None
                 if binance_data:
                     price_data = binance_data.get("price", {}) or {}
                     current_btc_price = price_data.get("close", 0)
+
+                    # Update reversal detector with kline data
+                    detector = reversal_detectors.get(symbol)
+                    if detector and current_btc_price:
+                        # We need OHLCV data - get from volatility data or estimate
+                        vol_data = binance_data.get("volatility", {}) or {}
+                        # Use current price as close, estimate others
+                        detector.update_candle(
+                            open_=current_btc_price,  # Approximation
+                            high=current_btc_price * 1.001,  # Small range
+                            low=current_btc_price * 0.999,
+                            close=current_btc_price,
+                            volume=1.0,  # Placeholder
+                            timestamp=int(now_ts * 1000),
+                            is_closed=True,
+                        )
 
                 # Check if window changed (to close trades)
                 if market in current_windows:
@@ -392,11 +425,6 @@ async def run_paper_trading(coins: list[str], verbose: bool = False):
                 if market in portfolio.open_trades:
                     continue
 
-                # Get Binance data
-                symbol = f"{coin.upper()}USDT"
-                binance_pattern = f"{symbol}_volatility_*.jsonl"
-                binance_data = get_latest_jsonl_row(binance_dir, binance_pattern)
-
                 # Evaluate gates
                 gate_result = evaluate_gates(poly_data, binance_data, config)
 
@@ -446,7 +474,32 @@ async def run_paper_trading(coins: list[str], verbose: bool = False):
                     persistence_s=state.persistence_s,
                 )
 
-                # Make decision
+                # === REVERSAL DETECTION ===
+                # Detect if price is reversing against our potential bet
+                reversal_score = None
+                reversal_direction = None
+                reversal_reason = None
+                momentum_pct = None
+
+                detector = reversal_detectors.get(symbol)
+                bet_side = "UP" if prob_up > 0.5 else "DOWN"
+
+                if detector and detector.has_enough_data:
+                    reversal_result = detector.detect(bet_side)
+                    reversal_score = reversal_result.score
+                    reversal_direction = reversal_result.direction.value
+                    reversal_reason = reversal_result.reason
+                    momentum_pct = reversal_result.momentum_pct
+
+                    # Log if reversal is significant
+                    if reversal_score >= 0.50:
+                        log.warning(
+                            f"[{market}] ⚠️ REVERSAL ALERT: score={reversal_score:.2f} "
+                            f"dir={reversal_direction} momentum={momentum_pct*100:.2f}% "
+                            f"reason={reversal_reason}"
+                        )
+
+                # Make decision (now includes reversal check)
                 decision = decide(
                     all_gates_passed=gate_result.all_passed,
                     gate_failure_reason=gate_result.reason,
@@ -456,6 +509,11 @@ async def run_paper_trading(coins: list[str], verbose: bool = False):
                     score=score_result.score,
                     regime=regime,
                     remaining_s=gate_result.time_remaining_s,
+                    # NEW: Reversal detection parameters
+                    reversal_score=reversal_score,
+                    reversal_direction=reversal_direction,
+                    reversal_reason=reversal_reason,
+                    momentum_pct=momentum_pct,
                     config=decision_config,
                 )
 
@@ -480,9 +538,10 @@ async def run_paper_trading(coins: list[str], verbose: bool = False):
                     action_text = decision.action.value if decision.action != Action.ENTER else f"ENTER {decision.side.value}"
                     
                     vol_str = f"{rv_5m*100:.0f}%" if rv_5m else "N/A"
+                    rev_str = f"rev={reversal_score:.2f}" if reversal_score else "rev=N/A"
                     log.info(
                         f"[{market}] [{''.join(gates_status)}] ALL:{gates_all} | "
-                        f"prob={prob_up:.1%} zone={zone} score={score_result.score:.2f} | "
+                        f"prob={prob_up:.1%} zone={zone} score={score_result.score:.2f} {rev_str} | "
                         f"spread={spread_pct:.1f}% depth=${depth:.0f} vol={vol_str} | "
                         f"persist={state.persistence_s:.0f}s remain={gate_result.time_remaining_s:.0f}s | "
                         f"{action_emoji} {action_text}"

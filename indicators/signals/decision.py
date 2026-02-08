@@ -2,10 +2,12 @@
 Decision logic for trading signals.
 
 Combines gates, score, and context to make final ENTER/NO_ENTER decision.
+Now includes reversal detection to prevent entering when market is reversing.
 """
 
 from dataclasses import dataclass
 from enum import Enum
+from typing import Optional
 
 
 class Action(Enum):
@@ -50,6 +52,22 @@ class DecisionConfig:
     force_entry_min_prob: float = 0.90  # 90% (antes: 95%) - melhor spread
     force_entry_max_remaining_s: float = 180.0  # 3 minutos (antes: 2min) - mais tempo
 
+    # === REVERSAL DETECTION ===
+    # Bloqueia entrada se detectar reversão contra nossa posição
+    reversal_check_enabled: bool = True
+    reversal_block_threshold: float = 0.70  # Score > 0.70 = bloqueia
+    reversal_alert_threshold: float = 0.50  # Score > 0.50 = alerta (log)
+
+
+@dataclass
+class ReversalInfo:
+    """Information about reversal detection."""
+    score: float = 0.0
+    direction: str = "none"  # "up", "down", "none"
+    should_block: bool = False
+    reason: str = ""
+    momentum_pct: Optional[float] = None
+
 
 @dataclass
 class Decision:
@@ -62,6 +80,7 @@ class Decision:
     persistence_s: float
     zone: str
     regime: str | None
+    reversal: Optional[ReversalInfo] = None  # Reversal detection info
 
 
 def decide(
@@ -84,6 +103,12 @@ def decide(
 
     # Time remaining in window (for forced entry)
     remaining_s: float | None = None,
+
+    # Reversal detection (NEW)
+    reversal_score: float | None = None,
+    reversal_direction: str | None = None,
+    reversal_reason: str | None = None,
+    momentum_pct: float | None = None,
 
     # Config
     config: DecisionConfig | None = None,
@@ -114,10 +139,57 @@ def decide(
     # Probabilidade do favorito (sempre > 0.5)
     prob_favorite = max(prob_up, 1 - prob_up)
 
+    # Build reversal info
+    reversal_info = ReversalInfo(
+        score=reversal_score or 0.0,
+        direction=reversal_direction or "none",
+        should_block=False,
+        reason=reversal_reason or "",
+        momentum_pct=momentum_pct,
+    )
+
+    # === REVERSAL CHECK (NEW - CRITICAL FOR YOUR STRATEGY) ===
+    # Bloqueia entrada se detectar reversão contra nossa posição
+    if config.reversal_check_enabled and reversal_score is not None:
+        # Check if reversal is against our bet
+        reversal_against_bet = (
+            (side == Side.UP and reversal_direction == "down") or
+            (side == Side.DOWN and reversal_direction == "up")
+        )
+
+        if reversal_against_bet and reversal_score >= config.reversal_block_threshold:
+            reversal_info.should_block = True
+            return Decision(
+                action=Action.NO_ENTER,
+                side=None,
+                confidence=None,
+                reason=f"reversal_blocked:score={reversal_score:.2f}_dir={reversal_direction}_{reversal_reason}",
+                score=score,
+                persistence_s=persistence_s,
+                zone=zone,
+                regime=regime,
+                reversal=reversal_info,
+            )
+
     # === FORCED ENTRY CHECK ===
-    # Se prob >= 95% e faltam <= 2min, SEMPRE entra (ignora outros filtros)
+    # Se prob >= 90% e faltam <= 3min, entra (mas RESPEITA reversal check!)
     if config.force_entry_enabled and remaining_s is not None:
         if prob_favorite >= config.force_entry_min_prob and remaining_s <= config.force_entry_max_remaining_s:
+            # Even on forced entry, check for strong reversal
+            if reversal_score and reversal_score >= config.reversal_block_threshold:
+                reversal_info.should_block = True
+                return Decision(
+                    action=Action.NO_ENTER,
+                    side=None,
+                    confidence=None,
+                    reason=f"forced_entry_blocked_by_reversal:score={reversal_score:.2f}",
+                    score=score,
+                    persistence_s=persistence_s,
+                    zone=zone,
+                    regime=regime,
+                    reversal=reversal_info,
+                )
+
             return Decision(
                 action=Action.ENTER,
                 side=side,
@@ -127,6 +199,7 @@ def decide(
                 persistence_s=persistence_s,
                 zone=zone,
                 regime=regime,
+                reversal=reversal_info,
             )
 
     # Check gates first (mandatory)
@@ -140,6 +213,7 @@ def decide(
             persistence_s=persistence_s,
             zone=zone,
             regime=regime,
+            reversal=reversal_info,
         )
 
     # Check zone
@@ -153,6 +227,7 @@ def decide(
             persistence_s=persistence_s,
             zone=zone,
             regime=regime,
+            reversal=reversal_info,
         )
 
     # Check volatility regime
@@ -166,6 +241,7 @@ def decide(
             persistence_s=persistence_s,
             zone=zone,
             regime=regime,
+            reversal=reversal_info,
         )
 
     # Check persistence
@@ -179,6 +255,7 @@ def decide(
             persistence_s=persistence_s,
             zone=zone,
             regime=regime,
+            reversal=reversal_info,
         )
 
     # Check score thresholds
@@ -192,6 +269,7 @@ def decide(
             persistence_s=persistence_s,
             zone=zone,
             regime=regime,
+            reversal=reversal_info,
         )
 
     # Determine confidence level
@@ -212,6 +290,7 @@ def decide(
         persistence_s=persistence_s,
         zone=zone,
         regime=regime,
+        reversal=reversal_info,
     )
 
 
