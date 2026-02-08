@@ -137,14 +137,15 @@ def decide(
         config = DecisionConfig()
 
     # Determine which side we're betting on
-    # ESTRATÉGIA: Sempre CONTRA o azarão (fade the favorite)
-    # Se prob_up >= 95%, entrar DOWN (contra o favorito UP)
-    # Se prob_up <= 5%, entrar UP (contra o favorito DOWN)
+    # ESTRATÉGIA: Apostar COM o favorito (contra o azarão)
+    # "Contra azarão" = apostar que o FAVORITO vai ganhar
+    # Se prob_up >= 95%, entrar UP (favorito = UP, azarão = DOWN)
+    # Se prob_up <= 5%, entrar DOWN (favorito = DOWN, azarão = UP)
     if prob_up >= 0.95:
-        side = Side.DOWN  # Entrar contra o favorito UP
+        side = Side.UP  # Favorito é UP, compramos UP a $0.95
         prob_favorite = prob_up
     elif prob_up <= 0.05:
-        side = Side.UP  # Entrar contra o favorito DOWN
+        side = Side.DOWN  # Favorito é DOWN, compramos DOWN a $0.95
         prob_favorite = 1 - prob_up
     else:
         # Para entradas normais (não forçadas), usar lógica padrão
@@ -230,7 +231,7 @@ def decide(
                 action=Action.ENTER,
                 side=side,  # Já definido como CONTRA o azarão acima
                 confidence=Confidence.HIGH,
-                reason=f"forced_entry_contra_azarão:prob={prob_favorite:.0%}_remaining={remaining_s:.0f}s_side={side.value}",
+                reason=f"forced_entry_com_favorito:prob={prob_favorite:.0%}_remaining={remaining_s:.0f}s_side={side.value}",
                 score=score,
                 persistence_s=persistence_s,
                 zone=zone,

@@ -70,6 +70,12 @@ class StateTracker:
         self._spread_history: dict[str, Deque[float]] = {}
         self._microprice_edge_history: dict[str, Deque[float]] = {}
 
+        # Defense-specific histories (with timestamps for 30s window)
+        self._imbalance_ts_history: dict[str, Deque[tuple[float, float]]] = {}
+        self._microprice_ts_history: dict[str, Deque[tuple[float, float]]] = {}
+        self._rv_5m_history: dict[str, Deque[tuple[float, float]]] = {}
+        self._taker_ratio_history: dict[str, Deque[tuple[float, float]]] = {}
+
     def _get_state(self, coin: str) -> TemporalState:
         """Get or create state for a coin."""
         if coin not in self._states:
@@ -78,6 +84,11 @@ class StateTracker:
             self._imbalance_history[coin] = deque(maxlen=self.window_size)
             self._spread_history[coin] = deque(maxlen=self.window_size)
             self._microprice_edge_history[coin] = deque(maxlen=self.window_size)
+            # Defense histories (60 ticks = 60 seconds at 1Hz)
+            self._imbalance_ts_history[coin] = deque(maxlen=60)
+            self._microprice_ts_history[coin] = deque(maxlen=60)
+            self._rv_5m_history[coin] = deque(maxlen=60)
+            self._taker_ratio_history[coin] = deque(maxlen=60)
         return self._states[coin]
 
     def _compute_rolling_stats(self, history: Deque[float], current: float) -> RollingStats:
@@ -119,6 +130,8 @@ class StateTracker:
         microprice_edge: float,
         window_start: int,
         now_ts: float | None = None,
+        rv_5m: float | None = None,
+        taker_ratio: float | None = None,
     ) -> TemporalState:
         """
         Update state for a coin with new tick data.
@@ -163,6 +176,14 @@ class StateTracker:
         self._imbalance_history[coin].append(imbalance)
         self._spread_history[coin].append(spread_pct)
         self._microprice_edge_history[coin].append(microprice_edge)
+
+        # Update defense histories (with timestamps)
+        self._imbalance_ts_history[coin].append((now_ts, imbalance))
+        self._microprice_ts_history[coin].append((now_ts, microprice_edge))
+        if rv_5m is not None:
+            self._rv_5m_history[coin].append((now_ts, rv_5m))
+        if taker_ratio is not None:
+            self._taker_ratio_history[coin].append((now_ts, taker_ratio))
 
         # Compute rolling stats
         state.prob_stats = self._compute_rolling_stats(self._prob_history[coin], prob)
@@ -241,6 +262,165 @@ class StateTracker:
             return None
 
         return history[-1] - history[-periods]
+
+    # === DEFENSE METHODS ===
+
+    def get_imbalance_delta_30s(self, coin: str) -> float | None:
+        """
+        Get change in imbalance over last 30 seconds.
+
+        Returns:
+            imbalance_now - imbalance_30s_ago, or None if not enough data
+        """
+        history = self._imbalance_ts_history.get(coin)
+        if not history or len(history) < 10:
+            return None
+
+        now_ts = history[-1][0]
+        current_imb = history[-1][1]
+
+        # Find value from ~30s ago
+        target_ts = now_ts - 30
+        old_imb = None
+        for ts, imb in history:
+            if ts >= target_ts:
+                old_imb = imb
+                break
+
+        if old_imb is None:
+            old_imb = history[0][1]  # Use oldest available
+
+        return current_imb - old_imb
+
+    def get_microprice_edge_ma_30s(self, coin: str) -> float | None:
+        """
+        Get 30-second moving average of microprice edge.
+
+        Returns:
+            Average microprice_vs_mid over last 30s, or None if not enough data
+        """
+        history = self._microprice_ts_history.get(coin)
+        if not history or len(history) < 10:
+            return None
+
+        now_ts = history[-1][0]
+        cutoff = now_ts - 30
+
+        values = [v for ts, v in history if ts >= cutoff]
+        if not values:
+            return None
+
+        return sum(values) / len(values)
+
+    def get_rv_spike(self, coin: str, window_s: int = 60) -> float | None:
+        """
+        Get volatility spike (% change in RV over window).
+
+        Returns:
+            (rv_now / rv_old) - 1, or None if not enough data
+        """
+        history = self._rv_5m_history.get(coin)
+        if not history or len(history) < 2:
+            return None
+
+        now_ts = history[-1][0]
+        current_rv = history[-1][1]
+        cutoff = now_ts - window_s
+
+        # Find oldest value within window
+        old_rv = None
+        for ts, rv in history:
+            if ts >= cutoff:
+                old_rv = rv
+                break
+
+        if old_rv is None or old_rv <= 0:
+            return None
+
+        return (current_rv / old_rv) - 1.0
+
+    def get_taker_ratio_ma_30s(self, coin: str) -> float | None:
+        """
+        Get 30-second moving average of taker ratio.
+
+        Returns:
+            Average taker_ratio over last 30s, or None if not enough data
+        """
+        history = self._taker_ratio_history.get(coin)
+        if not history or len(history) < 5:
+            return None
+
+        now_ts = history[-1][0]
+        cutoff = now_ts - 30
+
+        values = [v for ts, v in history if ts >= cutoff]
+        if not values:
+            return None
+
+        return sum(values) / len(values)
+
+    def is_microprice_against(self, coin: str, side: str, persist_s: int = 30) -> bool:
+        """
+        Check if microprice has been against position for persist_s seconds.
+
+        Args:
+            coin: Coin symbol
+            side: Position side ("UP" or "DOWN")
+            persist_s: Required persistence in seconds
+
+        Returns:
+            True if microprice is persistently against our position
+        """
+        history = self._microprice_ts_history.get(coin)
+        if not history or len(history) < persist_s:
+            return False
+
+        now_ts = history[-1][0]
+        cutoff = now_ts - persist_s
+
+        # Check if all values in the window are against us
+        for ts, edge in history:
+            if ts >= cutoff:
+                if side == "UP" and edge >= 0:
+                    return False  # Not all against
+                if side == "DOWN" and edge <= 0:
+                    return False  # Not all against
+
+        return True
+
+    def is_taker_against(
+        self, coin: str, side: str, persist_s: int = 30, threshold: float = 0.90
+    ) -> bool:
+        """
+        Check if taker ratio has been against position for persist_s seconds.
+
+        Args:
+            coin: Coin symbol
+            side: Position side ("UP" or "DOWN")
+            persist_s: Required persistence in seconds
+            threshold: Taker ratio threshold (< threshold for UP, > 1/threshold for DOWN)
+
+        Returns:
+            True if taker flow is persistently against our position
+        """
+        history = self._taker_ratio_history.get(coin)
+        if not history or len(history) < persist_s:
+            return False
+
+        now_ts = history[-1][0]
+        cutoff = now_ts - persist_s
+
+        high_threshold = 1.0 / threshold  # e.g., 1.11 if threshold = 0.90
+
+        # Check if all values in the window are against us
+        for ts, ratio in history:
+            if ts >= cutoff:
+                if side == "UP" and ratio >= threshold:
+                    return False  # Not all against
+                if side == "DOWN" and ratio <= high_threshold:
+                    return False  # Not all against
+
+        return True
 
 
 def format_state_summary(state: TemporalState) -> str:

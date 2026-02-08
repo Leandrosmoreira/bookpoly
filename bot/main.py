@@ -37,6 +37,11 @@ from indicators.signals.microstructure import compute_microstructure
 from indicators.signals.state import StateTracker
 from indicators.signals.scorer import compute_score
 from indicators.signals.decision import decide, Action, DecisionConfig
+from indicators.signals.defense import (
+    DefenseAction,
+    DefenseConfig,
+    format_defense_result,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -123,6 +128,9 @@ async def run_bot():
     position_manager = PositionManager(bot_config, initial_bankroll=1000.0)
     risk_manager = RiskManager(bot_config, risk_limits)
     state_tracker = StateTracker(window_size=300)
+    defense_config = DefenseConfig()
+
+    log.info(f"Defense mode: {'ENABLED' if defense_config.enabled else 'DISABLED'}")
 
     # Data directories
     project_root = Path(__file__).parent.parent
@@ -174,20 +182,7 @@ async def run_bot():
                 prev_imbalance = state_tracker.get_prev_imbalance(coin)
                 micro = compute_microstructure(poly_data, prev_imbalance)
 
-                # Update state
-                window_start = poly_data.get("window_start", 0)
-                state = state_tracker.update(
-                    coin=coin,
-                    gates_passed=gate_result.all_passed,
-                    prob=prob_up,
-                    imbalance=micro.imbalance,
-                    spread_pct=micro.spread_pct,
-                    microprice_edge=micro.microprice_vs_mid,
-                    window_start=window_start,
-                    now_ts=now_ts,
-                )
-
-                # Extract Binance indicators
+                # Extract Binance indicators (moved earlier for state update)
                 rv_5m = None
                 taker_ratio = None
                 regime = None
@@ -198,6 +193,107 @@ async def run_bot():
                     taker_ratio = sentiment.get("taker_buy_sell_ratio")
                     class_data = binance_data.get("classification", {}) or {}
                     regime = class_data.get("cluster")
+
+                # Update state (now includes defense indicators)
+                window_start = poly_data.get("window_start", 0)
+                state = state_tracker.update(
+                    coin=coin,
+                    gates_passed=gate_result.all_passed,
+                    prob=prob_up,
+                    imbalance=micro.imbalance,
+                    spread_pct=micro.spread_pct,
+                    microprice_edge=micro.microprice_vs_mid,
+                    window_start=window_start,
+                    now_ts=now_ts,
+                    rv_5m=rv_5m,
+                    taker_ratio=taker_ratio,
+                )
+
+                # === DEFENSE MODE: Check open positions ===
+                position = position_manager.get_position_for_market(market)
+                if position is not None and defense_config.enabled:
+                    # Update defense state
+                    position_manager.update_defense_state(
+                        token_id=position.token_id,
+                        imbalance=micro.imbalance,
+                        microprice_vs_mid=micro.microprice_vs_mid,
+                        rv_5m=rv_5m or 0.0,
+                        taker_ratio=taker_ratio or 1.0,
+                    )
+
+                    # Get z-score from state
+                    z_score = None
+                    if state.prob_stats and state.prob_stats.z_score is not None:
+                        z_score = state.prob_stats.z_score
+
+                    # Get imbalance delta from state
+                    imbalance_delta = state_tracker.get_imbalance_delta_30s(coin)
+
+                    # Check defense
+                    defense_result = position_manager.check_defense(
+                        token_id=position.token_id,
+                        remaining_s=gate_result.time_remaining_s,
+                        prob_up=prob_up,
+                        imbalance=micro.imbalance,
+                        imbalance_delta=imbalance_delta,
+                        microprice_vs_mid=micro.microprice_vs_mid,
+                        taker_ratio=taker_ratio or 1.0,
+                        rv_5m=rv_5m or 0.0,
+                        regime=regime,
+                        z_score=z_score,
+                    )
+
+                    # Log defense status if score is concerning
+                    if defense_result.score >= defense_config.alert_threshold:
+                        log.warning(f"[{market}] DEFENSE: {format_defense_result(defense_result)}")
+
+                    # Execute defense action
+                    if defense_result.action == DefenseAction.EXIT_EMERGENCY:
+                        log.warning(f"[{market}] EMERGENCY EXIT: {defense_result.reason}")
+                        current_price = prob_up if position.side == "UP" else (1 - prob_up)
+                        closed = position_manager.exit_early(
+                            position.token_id, current_price, defense_result.reason
+                        )
+                        if closed:
+                            log.info(f"[{market}] Closed early: P&L=${closed.pnl:.2f}")
+                            # TODO: Execute actual sell order via trader
+                        continue  # Skip entry logic for this market
+
+                    elif defense_result.action == DefenseAction.EXIT_TACTICAL:
+                        log.warning(f"[{market}] TACTICAL EXIT: {defense_result.reason}")
+                        current_price = prob_up if position.side == "UP" else (1 - prob_up)
+                        closed = position_manager.exit_early(
+                            position.token_id, current_price, defense_result.reason
+                        )
+                        if closed:
+                            log.info(f"[{market}] Closed tactically: P&L=${closed.pnl:.2f}")
+                        continue
+
+                    elif defense_result.action == DefenseAction.EXIT_TIME:
+                        log.warning(f"[{market}] TIME EXIT: {defense_result.reason}")
+                        current_price = prob_up if position.side == "UP" else (1 - prob_up)
+                        closed = position_manager.exit_early(
+                            position.token_id, current_price, defense_result.reason
+                        )
+                        if closed:
+                            log.info(f"[{market}] Time exit: P&L=${closed.pnl:.2f}")
+                        continue
+
+                    elif defense_result.action == DefenseAction.FLIP:
+                        log.warning(f"[{market}] FLIP: {defense_result.reason}")
+                        new_side = "DOWN" if position.side == "UP" else "UP"
+                        current_price = prob_up if position.side == "UP" else (1 - prob_up)
+                        closed, new_trade = position_manager.flip_position(
+                            position.token_id, current_price, new_side, defense_result.reason
+                        )
+                        if closed:
+                            log.info(f"[{market}] Flipped from {position.side} to {new_side}")
+                            log.info(f"[{market}] Closed: P&L=${closed.pnl:.2f}")
+                            if new_trade:
+                                log.info(f"[{market}] New position: {new_trade.size:.2f} @ {new_trade.entry_price:.4f}")
+                        continue
+
+                    # If HOLD, continue monitoring (no action needed)
 
                 # Compute score
                 score_result = compute_score(
