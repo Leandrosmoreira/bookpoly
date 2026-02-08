@@ -36,6 +36,14 @@ from indicators.signals.decision import decide, Action, DecisionConfig
 from indicators.binance_realtime.reversal_detector import ReversalDetector
 from indicators.binance_realtime.config import BinanceRealtimeConfig
 
+# Order management
+from bot.order_manager import (
+    OrderManager,
+    OrderManagerConfig,
+    OrderBookSnapshot,
+    create_book_snapshot_from_polymarket_data,
+)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)-5s | %(message)s",
@@ -320,6 +328,14 @@ async def run_paper_trading(coins: list[str], verbose: bool = False):
         reversal_detectors[symbol] = ReversalDetector(reversal_config)
     log.info(f"  Reversal Detection: ENABLED (threshold=0.70)")
 
+    # Initialize order manager
+    order_config = OrderManagerConfig()
+    order_manager = OrderManager(
+        config=order_config,
+        bot_config=None,  # No real trading in paper mode
+    )
+    log.info(f"  Order Manager: ENABLED (timeout={order_config.order_timeout_s}s, max_attempts={order_config.max_attempts})")
+
     seq = 0
     last_status_time = time.time()
 
@@ -565,16 +581,62 @@ async def run_paper_trading(coins: list[str], verbose: bool = False):
                         log.info(f"[{market}] ⛔ BLOCKED: {reason}")
                         continue
 
-                    # Calculate entry price
+                    # === INTELLIGENT ORDER EXECUTION ===
+                    # Use OrderManager to calculate optimal entry price
                     side = decision.side.value
-                    entry_price = prob_up if side == "UP" else (1 - prob_up)
+                    book = create_book_snapshot_from_polymarket_data(poly_data)
 
-                    # Create trade
+                    # Calculate entry price using order manager
+                    entry_price = order_manager.calculate_entry_price(
+                        book=book,
+                        side="BUY" if side == "UP" else "SELL",
+                        attempt=1,
+                    )
+
+                    # Verify liquidity at our entry level
+                    has_liquidity, liquidity_reason = order_manager.verify_liquidity(
+                        entry_price=entry_price,
+                        book=book,
+                        side="BUY" if side == "UP" else "SELL",
+                    )
+
+                    if not has_liquidity:
+                        log.warning(
+                            f"[{market}] ⚠️ Liquidity check failed: {liquidity_reason} "
+                            f"(best_bid={book.best_bid:.3f}, best_ask={book.best_ask:.3f})"
+                        )
+                        continue
+
+                    # Estimate fill probability
+                    fill_prob = order_manager.estimator.estimate(
+                        our_price=entry_price,
+                        book=book,
+                        remaining_s=gate_result.time_remaining_s,
+                        side="BUY" if side == "UP" else "SELL",
+                    )
+
+                    if fill_prob < order_config.min_fill_probability:
+                        log.warning(
+                            f"[{market}] ⚠️ Fill probability too low: "
+                            f"{fill_prob:.0%} < {order_config.min_fill_probability:.0%}"
+                        )
+                        continue
+
+                    # In paper trading, we simulate immediate fill
+                    # Real trading would use execute_with_retry
+                    log.info(
+                        f"[{market}] 📋 Order calc: entry={entry_price:.3f} "
+                        f"(bid={book.best_bid:.3f}+delta) "
+                        f"fill_prob={fill_prob:.0%} "
+                        f"depth=${book.ask_depth:.0f}"
+                    )
+
+                    # Create trade with optimized entry price
                     trade = PaperTrade(
                         timestamp=int(now_ts * 1000),
                         market=market,
                         side=side,
-                        entry_price=entry_price,
+                        entry_price=entry_price,  # Use optimized price
                         size_usd=5.0,
                         window_start=window_start,
                         window_end=window_start + 900,
@@ -588,9 +650,10 @@ async def run_paper_trading(coins: list[str], verbose: bool = False):
                         btc_price_str = f"BTC=${current_btc_price:.0f}" if current_btc_price else ""
                         log.info(
                             f"[{market}] ★ ENTER {side} ★ "
-                            f"@ ${entry_price:.2f} "
+                            f"@ ${entry_price:.3f} (POST ONLY) "
                             f"score={score_result.score:.2f} "
                             f"conf={decision.confidence.value} "
+                            f"fill_prob={fill_prob:.0%} "
                             f"{btc_price_str} "
                             f"reason={decision.reason}"
                         )
