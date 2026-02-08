@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>📈 BookPoly Bot Dashboard</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>📈 BookPoly Paper Trading Bot</h1>
+            <div class="header-right">
+                <div class="clock" id="clock">--:--:--</div>
+                <div class="status-indicator">
+                    <span class="status-dot" id="statusDot"></span>
+                    <span id="statusText">Conectando...</span>
+                </div>
+            </div>
+        </header>
+
+        <!-- Dashboard Cards -->
+        <div class="dashboard-grid">
+            <!-- Balance Card -->
+            <div class="card balance-card">
+                <div class="card-header">
+                    <h2>💰 Balance</h2>
+                </div>
+                <div class="card-content">
+                    <div class="big-number" id="balance">$100.00</div>
+                    <div class="sub-info">
+                        <span>Inicial: $<span id="initialBalance">100.00</span></span>
+                        <span class="roi" id="roi">+0.0%</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Trades Card -->
+            <div class="card trades-card">
+                <div class="card-header">
+                    <h2>📊 Trades</h2>
+                </div>
+                <div class="card-content">
+                    <div class="stats-row">
+                        <div class="stat-item">
+                            <div class="stat-label">Total</div>
+                            <div class="stat-value" id="totalTrades">0</div>
+                        </div>
+                        <div class="stat-item">
+                            <div class="stat-label">Abertos</div>
+                            <div class="stat-value" id="openTrades">0</div>
+                        </div>
+                        <div class="stat-item">
+                            <div class="stat-label">Fechados</div>
+                            <div class="stat-value" id="closedTrades">0</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Performance Card -->
+            <div class="card performance-card">
+                <div class="card-header">
+                    <h2>🎯 Performance</h2>
+                </div>
+                <div class="card-content">
+                    <div class="stats-row">
+                        <div class="stat-item">
+                            <div class="stat-label">Vitórias</div>
+                            <div class="stat-value win" id="wins">0</div>
+                        </div>
+                        <div class="stat-item">
+                            <div class="stat-label">Derrotas</div>
+                            <div class="stat-value loss" id="losses">0</div>
+                        </div>
+                        <div class="stat-item">
+                            <div class="stat-label">Win Rate</div>
+                            <div class="stat-value" id="winRate">0%</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- PnL Card -->
+            <div class="card pnl-card">
+                <div class="card-header">
+                    <h2>💵 P&L</h2>
+                </div>
+                <div class="card-content">
+                    <div class="big-number" id="totalPnl">$0.00</div>
+                    <div class="sub-info">
+                        <span>Diário: $<span id="dailyPnl">0.00</span></span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Recent Trades Table -->
+        <div class="card recent-trades-card">
+            <div class="card-header">
+                <h2>📋 Trades Recentes (Últimos 50)</h2>
+            </div>
+            <div class="card-content">
+                <div class="table-container">
+                    <table id="recentTradesTable">
+                        <thead>
+                            <tr>
+                                <th>Hora</th>
+                                <th>Mercado</th>
+                                <th>Tipo</th>
+                                <th>Preço</th>
+                                <th>Resultado</th>
+                                <th>P&L</th>
+                            </tr>
+                        </thead>
+                        <tbody id="recentTradesBody">
+                            <tr><td colspan="6" class="empty">Carregando...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- Live Log -->
+        <div class="card log-card">
+            <div class="card-header">
+                <h2>📝 Log ao Vivo</h2>
+                <button class="btn-clear" onclick="clearLog()">Limpar</button>
+            </div>
+            <div class="card-content">
+                <div id="liveLog" class="log-container"></div>
+            </div>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='script.js') }}"></script>
+</body>
+</html>
+

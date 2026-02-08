@@ -47,10 +47,10 @@ class DecisionConfig:
     blocked_regimes: tuple = ("muito_alta",)
 
     # === FORCED ENTRY (override all filters) ===
-    # Baseado na análise: Prob >=90% + <=180s tem melhor win rate com spread ok
+    # Estratégia: Entrar APENAS nos últimos 4 minutos com prob >= 95% CONTRA o azarão
     force_entry_enabled: bool = True
-    force_entry_min_prob: float = 0.90  # 90% (antes: 95%) - melhor spread
-    force_entry_max_remaining_s: float = 180.0  # 3 minutos (antes: 2min) - mais tempo
+    force_entry_min_prob: float = 0.95  # 95% - probabilidade muito alta
+    force_entry_max_remaining_s: float = 240.0  # 4 minutos (últimos 4 min da janela)
 
     # === REVERSAL DETECTION ===
     # Bloqueia entrada se detectar reversão contra nossa posição
@@ -124,6 +124,10 @@ def decide(
         persistence_s: Seconds gates have been satisfied
         score: Composite score (0-1)
         regime: Volatility regime
+        reversal_score: Score de reversão (0-1)
+        reversal_direction: Direção da reversão ("up", "down", "none")
+        reversal_reason: Motivo da reversão
+        momentum_pct: Momentum percentual
         config: Decision thresholds
 
     Returns:
@@ -133,11 +137,19 @@ def decide(
         config = DecisionConfig()
 
     # Determine which side we're betting on
-    # We bet on the FAVORITE (against the underdog)
-    side = Side.UP if prob_up > 0.5 else Side.DOWN
-
-    # Probabilidade do favorito (sempre > 0.5)
-    prob_favorite = max(prob_up, 1 - prob_up)
+    # ESTRATÉGIA: Sempre CONTRA o azarão (fade the favorite)
+    # Se prob_up >= 95%, entrar DOWN (contra o favorito UP)
+    # Se prob_up <= 5%, entrar UP (contra o favorito DOWN)
+    if prob_up >= 0.95:
+        side = Side.DOWN  # Entrar contra o favorito UP
+        prob_favorite = prob_up
+    elif prob_up <= 0.05:
+        side = Side.UP  # Entrar contra o favorito DOWN
+        prob_favorite = 1 - prob_up
+    else:
+        # Para entradas normais (não forçadas), usar lógica padrão
+        side = Side.UP if prob_up > 0.5 else Side.DOWN
+        prob_favorite = max(prob_up, 1 - prob_up)
 
     # Build reversal info
     reversal_info = ReversalInfo(
@@ -148,7 +160,7 @@ def decide(
         momentum_pct=momentum_pct,
     )
 
-    # === REVERSAL CHECK (NEW - CRITICAL FOR YOUR STRATEGY) ===
+    # === REVERSAL CHECK (CRITICAL FOR YOUR STRATEGY) ===
     # Bloqueia entrada se detectar reversão contra nossa posição
     if config.reversal_check_enabled and reversal_score is not None:
         # Check if reversal is against our bet
@@ -171,36 +183,67 @@ def decide(
                 reversal=reversal_info,
             )
 
-    # === FORCED ENTRY CHECK ===
-    # Se prob >= 90% e faltam <= 3min, entra (mas RESPEITA reversal check!)
+    # === FORCED ENTRY CHECK (com segurança + reversal check) ===
+    # ESTRATÉGIA: Entrar APENAS nos últimos 4 minutos com prob >= 95% CONTRA o azarão
+    # Só permite entrada forçada se:
+    # 1. Probabilidade muito alta (>= 95% para qualquer lado)
+    # 2. Tempo restante adequado (<= 240s = últimos 4 minutos)
+    # 3. TODOS os gates passaram (segurança básica)
+    # 4. Zone não é perigosa
+    # 5. Regime não é muito alto
+    # 6. Score mínimo aceitável
+    # 7. SEM reversão detectada contra nossa posição
     if config.force_entry_enabled and remaining_s is not None:
-        if prob_favorite >= config.force_entry_min_prob and remaining_s <= config.force_entry_max_remaining_s:
-            # Even on forced entry, check for strong reversal
-            if reversal_score and reversal_score >= config.reversal_block_threshold:
-                reversal_info.should_block = True
-                return Decision(
-                    action=Action.NO_ENTER,
-                    side=None,
-                    confidence=None,
-                    reason=f"forced_entry_blocked_by_reversal:score={reversal_score:.2f}",
-                    score=score,
-                    persistence_s=persistence_s,
-                    zone=zone,
-                    regime=regime,
-                    reversal=reversal_info,
-                )
+        # Verificar se temos prob >= 95% em qualquer direção
+        has_extreme_prob = (prob_up >= config.force_entry_min_prob) or (prob_up <= (1 - config.force_entry_min_prob))
 
+        # Check for reversal even on forced entry
+        reversal_blocks = (
+            reversal_score is not None and
+            reversal_score >= config.reversal_block_threshold
+        )
+
+        if reversal_blocks:
+            reversal_info.should_block = True
             return Decision(
-                action=Action.ENTER,
-                side=side,
-                confidence=Confidence.HIGH,
-                reason=f"forced_entry:prob={prob_favorite:.0%}_remaining={remaining_s:.0f}s",
+                action=Action.NO_ENTER,
+                side=None,
+                confidence=None,
+                reason=f"forced_entry_blocked_by_reversal:score={reversal_score:.2f}",
                 score=score,
                 persistence_s=persistence_s,
                 zone=zone,
                 regime=regime,
                 reversal=reversal_info,
             )
+
+        if (
+            has_extreme_prob
+            and remaining_s <= config.force_entry_max_remaining_s  # Últimos 4 minutos
+            and remaining_s >= 30  # Mas não nos últimos 30 segundos (segurança)
+            and all_gates_passed  # OBRIGATÓRIO: Gates devem passar
+            and zone not in config.blocked_zones  # OBRIGATÓRIO: Zone segura
+            and (regime is None or regime not in config.blocked_regimes)  # OBRIGATÓRIO: Regime OK
+            and score >= config.score_low  # OBRIGATÓRIO: Score mínimo
+        ):
+            return Decision(
+                action=Action.ENTER,
+                side=side,  # Já definido como CONTRA o azarão acima
+                confidence=Confidence.HIGH,
+                reason=f"forced_entry_contra_azarão:prob={prob_favorite:.0%}_remaining={remaining_s:.0f}s_side={side.value}",
+                score=score,
+                persistence_s=persistence_s,
+                zone=zone,
+                regime=regime,
+                reversal=reversal_info,
+            )
+
+    # === ESTRATÉGIA RESTRITA: APENAS ENTRADA FORÇADA ===
+    # Desabilitar entradas normais - só permitir entrada forçada com:
+    # - Prob >= 95% (qualquer lado)
+    # - Últimos 4 minutos (240s >= remaining >= 30s)
+    # - Contra o azarão
+    # Se não passou pela entrada forçada acima, NÃO ENTRAR
 
     # Check gates first (mandatory)
     if not all_gates_passed:
@@ -244,48 +287,14 @@ def decide(
             reversal=reversal_info,
         )
 
-    # Check persistence
-    if persistence_s < config.min_persistence_s:
-        return Decision(
-            action=Action.NO_ENTER,
-            side=None,
-            confidence=None,
-            reason=f"persistence_low:{persistence_s:.0f}s<{config.min_persistence_s:.0f}s",
-            score=score,
-            persistence_s=persistence_s,
-            zone=zone,
-            regime=regime,
-            reversal=reversal_info,
-        )
-
-    # Check score thresholds
-    if score < config.score_low:
-        return Decision(
-            action=Action.NO_ENTER,
-            side=None,
-            confidence=None,
-            reason=f"score_too_low:{score:.2f}<{config.score_low:.2f}",
-            score=score,
-            persistence_s=persistence_s,
-            zone=zone,
-            regime=regime,
-            reversal=reversal_info,
-        )
-
-    # Determine confidence level
-    if score >= config.score_high:
-        confidence = Confidence.HIGH
-    elif score >= config.score_medium:
-        confidence = Confidence.MEDIUM
-    else:
-        confidence = Confidence.LOW
-
-    # All conditions met - ENTER!
+    # === BLOQUEAR ENTRADAS NORMAIS ===
+    # Só permitir entrada forçada (já verificada acima)
+    # Se chegou aqui, não passou pela entrada forçada, então NÃO ENTRAR
     return Decision(
-        action=Action.ENTER,
-        side=side,
-        confidence=confidence,
-        reason="all_conditions_met",
+        action=Action.NO_ENTER,
+        side=None,
+        confidence=None,
+        reason=f"only_forced_entry_allowed:prob={prob_favorite:.0%}_remaining={remaining_s:.0f}s" if remaining_s else f"only_forced_entry_allowed:prob={prob_favorite:.0%}",
         score=score,
         persistence_s=persistence_s,
         zone=zone,

@@ -104,22 +104,23 @@ class PaperPortfolio:
         """Check if we can open a new trade."""
         now = time.time()
 
-        # Check halt
-        if self.trading_halted:
-            if now >= self.halt_until:
-                self.trading_halted = False
-                self.consecutive_losses = 0
-                log.info("Trading resumed after halt")
-            else:
-                remaining = int(self.halt_until - now)
-                return False, f"Trading halted ({remaining}s remaining)"
+        # Check halt - DESABILITADO para teste
+        # if self.trading_halted:
+        #     if now >= self.halt_until:
+        #         self.trading_halted = False
+        #         self.consecutive_losses = 0
+        #         log.info("Trading resumed after halt")
+        #     else:
+        #         remaining = int(self.halt_until - now)
+        #         return False, f"Trading halted ({remaining}s remaining)"
 
         # Check daily limits
         if self.daily_trades >= self.max_daily_trades:
             return False, f"Daily trade limit ({self.daily_trades}/{self.max_daily_trades})"
 
-        if self.daily_pnl <= -self.max_daily_loss:
-            return False, f"Daily loss limit (${self.daily_pnl:.2f})"
+        # Daily loss limit - DESABILITADO para teste
+        # if self.daily_pnl <= -self.max_daily_loss:
+        #     return False, f"Daily loss limit (${self.daily_pnl:.2f})"
 
         # Check open positions
         if len(self.open_trades) >= self.max_open_positions:
@@ -192,11 +193,11 @@ class PaperPortfolio:
             self.total_losses += 1
             self.consecutive_losses += 1
 
-            # Check consecutive losses
-            if self.consecutive_losses >= self.max_consecutive_losses:
-                self.trading_halted = True
-                self.halt_until = time.time() + 3600  # 1 hour
-                log.warning(f"Trading HALTED: {self.consecutive_losses} consecutive losses")
+            # Check consecutive losses - DESABILITADO para teste
+            # if self.consecutive_losses >= self.max_consecutive_losses:
+            #     self.trading_halted = True
+            #     self.halt_until = time.time() + 3600  # 1 hour
+            #     log.warning(f"Trading HALTED: {self.consecutive_losses} consecutive losses")
 
         # Update balance and PnL
         self.balance += trade.size_usd + trade.pnl  # Return cost + PnL
@@ -529,7 +530,9 @@ async def run_paper_trading(coins: list[str], verbose: bool = False):
                     gates_all = "✓" if gate_result.all_passed else "✗"
                     
                     # Get key parameters (yes_data já foi definido antes)
-                    spread_pct = (yes_data.get("spread", 0) / yes_data.get("mid", 1)) * 100 if yes_data.get("mid", 0) > 0 else 0
+                    spread = yes_data.get("spread") or 0
+                    mid = yes_data.get("mid") or 0
+                    spread_pct = (spread / mid * 100) if mid > 0 else 0
                     depth = (yes_data.get("bid_depth", 0) or 0) + (yes_data.get("ask_depth", 0) or 0)
                     latency = poly_data.get("fetch", {}).get("latency_ms", 0)
                     

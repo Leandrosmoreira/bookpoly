@@ -193,7 +193,12 @@ class PolymarketTrader:
         price: float,
     ) -> Order | None:
         """
-        Place a limit order.
+        Place a POST ONLY limit order.
+
+        POST ONLY means:
+        - Order can only be maker (added to order book)
+        - If it would match immediately, it is cancelled
+        - Guarantees maker fee rebate, never pays taker fee
 
         Args:
             token_id: Token ID to trade
@@ -243,6 +248,7 @@ class PolymarketTrader:
                 "size": str(size),
                 "price": str(price),
                 "orderType": "LIMIT",
+                "postOnly": True,  # POST ONLY: só pode ser maker, nunca taker
             }
 
             result = await self._request("POST", "/order", data=data)

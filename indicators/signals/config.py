@@ -11,6 +11,7 @@ class SignalConfig:
 
     # === TIME GATE ===
     # Only trade in the last N seconds of the 15-min window
+    # Estratégia: Entrar APENAS nos últimos 4 minutos (240s)
     time_window_start_s: int = int(os.getenv("SIGNAL_TIME_START_S", "660"))  # 11 min = últimos 4 min
     time_window_end_s: int = int(os.getenv("SIGNAL_TIME_END_S", "870"))  # 14:30 = não entrar nos últimos 30s
     window_duration_s: int = 900  # 15 minutes
