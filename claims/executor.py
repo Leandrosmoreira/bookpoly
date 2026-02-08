@@ -152,17 +152,18 @@ class ClaimExecutor:
         try:
             url = f"{self.config.clob_base_url}/order"
 
-            # Order payload
+            # Order payload (must use camelCase like bot/trader.py)
+            # Note: funder is NOT included in body (it's in headers/auth)
             order_data = {
-                "token_id": item.token_id,
+                "tokenID": item.token_id,
                 "side": "SELL",
                 "price": str(self.config.sell_price),
                 "size": str(item.shares),
-                "order_type": "GTC",  # Good til cancelled
-                "funder": self.config.funder,
+                "orderType": "LIMIT",
             }
 
-            body = json.dumps(order_data)
+            # Use same JSON format as bot/trader.py (no spaces, consistent)
+            body = json.dumps(order_data, separators=(',', ':'))
             headers = self._get_auth_headers("POST", "/order", body)
             headers["Content-Type"] = "application/json"
 
