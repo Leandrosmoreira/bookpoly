@@ -32,7 +32,10 @@ class ClaimConfig:
     gamma_base_url: str = os.getenv("GAMMA_BASE_URL", "https://gamma-api.polymarket.com")
     api_key: str = os.getenv("POLYMARKET_API_KEY", "")
     api_secret: str = os.getenv("POLYMARKET_API_SECRET", "")
+    api_passphrase: str = os.getenv("POLYMARKET_PASSPHRASE", "")
     funder: str = os.getenv("POLYMARKET_FUNDER", "")  # Wallet address
+    private_key: str = os.getenv("POLYMARKET_PRIVATE_KEY", "")  # For signing orders
+    signature_type: int = int(os.getenv("POLYMARKET_SIGNATURE_TYPE", "1"))  # 1 = Magic email
 
     # === POLYGON (optional, for balance checks) ===
     polygon_rpc: str = os.getenv("POLYGON_RPC_URL", "https://polygon-rpc.com")
@@ -60,7 +63,7 @@ class ClaimConfig:
 
     def is_configured(self) -> bool:
         """Check if API credentials are configured."""
-        return bool(self.api_key and self.api_secret and self.funder)
+        return bool(self.private_key and self.funder)
 
     def validate(self) -> list[str]:
         """Validate configuration, return list of errors."""
@@ -69,12 +72,10 @@ class ClaimConfig:
         if not self.enabled:
             return ["Claim sweeper is disabled (CLAIM_ENABLED=false)"]
 
-        if not self.api_key:
-            errors.append("POLYMARKET_API_KEY not set")
-        if not self.api_secret:
-            errors.append("POLYMARKET_API_SECRET not set")
+        if not self.private_key:
+            errors.append("POLYMARKET_PRIVATE_KEY not set (get from reveal.magic.link/polymarket)")
         if not self.funder:
-            errors.append("POLYMARKET_FUNDER not set")
+            errors.append("POLYMARKET_FUNDER not set (your wallet address from polymarket.com/settings)")
 
         if self.sell_price > 0.99:
             errors.append(f"sell_price {self.sell_price} > 0.99 (API max)")

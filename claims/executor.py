@@ -1,49 +1,125 @@
 """
-Claim Executor - Executes claims via SELL@0.99 workaround.
+Claim Executor - Executes claims via SELL@0.99 workaround using py-clob-client.
 
 Since Polymarket doesn't have an official claim API, we use the workaround
 discovered by the community: create a SELL order at price 0.99 for resolved
 positions. The order is filled instantly and we receive $0.99 per share.
+
+IMPORTANT: Orders must be cryptographically signed using py-clob-client.
+Simple REST calls don't work - the API requires signed order objects.
 """
-import asyncio
-import hmac
-import hashlib
-import httpx
-import json
 import logging
 import time
 from typing import Optional
+
 from claims.config import ClaimConfig
 from claims.models import ClaimItem, ClaimResult
 
 log = logging.getLogger(__name__)
 
+# Import py-clob-client
+try:
+    from py_clob_client.client import ClobClient
+    from py_clob_client.clob_types import ApiCreds, OrderArgs, OrderType
+    from py_clob_client.constants import SELL
+    PY_CLOB_AVAILABLE = True
+except ImportError:
+    PY_CLOB_AVAILABLE = False
+    log.warning("py-clob-client not installed. Run: pip install py-clob-client")
+
 
 class ClaimExecutor:
     """
-    Executes claims via SELL@0.99 workaround.
+    Executes claims via SELL@0.99 workaround using py-clob-client.
 
     How it works:
     1. After market resolves, winning shares are worth $1.00
     2. We create a SELL order at $0.99 (max allowed by API)
     3. Order is filled instantly by the system
     4. We receive $0.99 per share (1% "fee" for the workaround)
+
+    IMPORTANT: Uses py-clob-client for proper order signing.
     """
 
     def __init__(self, config: ClaimConfig):
         self.config = config
-        self.client = httpx.AsyncClient(timeout=30.0)
+        self.clob_client: Optional[ClobClient] = None
+        self._initialized = False
+
+    def _ensure_initialized(self) -> bool:
+        """Initialize py-clob-client if not already done."""
+        if self._initialized:
+            return True
+
+        if not PY_CLOB_AVAILABLE:
+            log.error("py-clob-client not available. Install with: pip install py-clob-client")
+            return False
+
+        if not self.config.private_key:
+            log.error("POLYMARKET_PRIVATE_KEY not set")
+            return False
+
+        if not self.config.funder:
+            log.error("POLYMARKET_FUNDER not set")
+            return False
+
+        try:
+            # Remove 0x prefix if present
+            private_key = self.config.private_key
+            if private_key.startswith("0x"):
+                private_key = private_key[2:]
+
+            # Initialize ClobClient with Magic email signature type
+            self.clob_client = ClobClient(
+                host=self.config.clob_base_url,
+                key=private_key,
+                chain_id=self.config.chain_id,
+                signature_type=self.config.signature_type,  # 1 = Magic email
+                funder=self.config.funder,
+            )
+
+            # Set API credentials if available
+            if self.config.api_key and self.config.api_secret:
+                creds = ApiCreds(
+                    api_key=self.config.api_key,
+                    api_secret=self.config.api_secret,
+                    api_passphrase=self.config.api_passphrase or "",
+                )
+                self.clob_client.set_api_creds(creds)
+                log.info("Using provided API credentials")
+            else:
+                # Derive API credentials from private key
+                log.info("Deriving API credentials from private key...")
+                try:
+                    creds = self.clob_client.derive_api_key()
+                    self.clob_client.set_api_creds(creds)
+                    log.info(f"Derived API key: {creds.api_key[:8]}...")
+                except Exception:
+                    # Try to create new credentials
+                    log.info("Creating new API credentials...")
+                    creds = self.clob_client.create_api_key()
+                    self.clob_client.set_api_creds(creds)
+                    log.info(f"Created API key: {creds.api_key[:8]}...")
+
+            self._initialized = True
+            log.info("ClobClient initialized successfully")
+            return True
+
+        except Exception as e:
+            log.error(f"Failed to initialize ClobClient: {e}")
+            return False
 
     async def close(self):
-        """Close HTTP client."""
-        await self.client.aclose()
+        """Close resources."""
+        # py-clob-client doesn't need explicit closing
+        pass
 
     async def claim(self, item: ClaimItem) -> ClaimResult:
         """
         Execute a claim for the given item.
 
         For winning positions: SELL at 0.99
-        For losing positions: We could skip or SELL at 0.01 (minimal recovery)
+        For losing positions: Skip (nothing to claim)
         """
         started_at = int(time.time())
 
@@ -75,31 +151,42 @@ class ClaimExecutor:
                 started_at=started_at,
             )
 
+        # Ensure client is initialized
+        if not self._ensure_initialized():
+            return ClaimResult(
+                success=False,
+                claim_id=item.claim_id,
+                error="Failed to initialize ClobClient",
+                retryable=True,
+                started_at=started_at,
+            )
+
         try:
-            # Create SELL order at max price (0.99)
-            order_result = await self._create_sell_order(item)
+            log.info(f"Creating SELL order for {item.shares:.4f} shares @ ${self.config.sell_price}")
 
-            if not order_result:
-                return ClaimResult(
-                    success=False,
-                    claim_id=item.claim_id,
-                    error="Failed to create order",
-                    retryable=True,
-                    started_at=started_at,
-                )
+            # Create order using py-clob-client
+            order_args = OrderArgs(
+                token_id=item.token_id,
+                price=self.config.sell_price,
+                size=item.shares,
+                side=SELL,
+            )
 
-            order_id = order_result.get("order_id") or order_result.get("id", "")
+            # Create and sign the order
+            signed_order = self.clob_client.create_order(order_args)
 
-            # Wait for fill (should be instant for resolved markets)
-            fill_result = await self._wait_for_fill(order_id, timeout=30)
+            # Post the order
+            result = self.clob_client.post_order(signed_order, OrderType.GTC)
 
-            if fill_result.get("filled"):
-                amount_received = float(fill_result.get("amount", item.shares * self.config.sell_price))
-                fee_paid = item.shares - amount_received
+            order_id = result.get("orderID", "") or result.get("order_id", "")
+
+            if result.get("success") or order_id:
+                amount_received = item.shares * self.config.sell_price
+                fee_paid = item.shares * (1.0 - self.config.sell_price)
 
                 log.info(
-                    f"Successfully claimed {item.shares:.4f} shares "
-                    f"for ${amount_received:.2f} (fee: ${fee_paid:.4f})"
+                    f"Successfully created SELL order {order_id}: "
+                    f"{item.shares:.4f} shares @ ${self.config.sell_price:.2f} = ${amount_received:.2f}"
                 )
 
                 return ClaimResult(
@@ -108,19 +195,19 @@ class ClaimExecutor:
                     order_id=order_id,
                     amount_received=amount_received,
                     fee_paid=fee_paid,
-                    raw_response=fill_result,
+                    raw_response=result,
                     started_at=started_at,
                 )
             else:
-                error = fill_result.get("error", "Order not filled")
-                log.warning(f"Claim not filled: {error}")
+                error = result.get("error", result.get("errorMsg", "Unknown error"))
+                log.error(f"Order creation failed: {error}")
 
-                # Check if already claimed (API returns error for 0 balance)
-                if "insufficient" in error.lower() or "balance" in error.lower():
+                # Check if already claimed
+                error_lower = str(error).lower()
+                if "insufficient" in error_lower or "balance" in error_lower:
                     return ClaimResult(
                         success=True,  # Consider it success if already claimed
                         claim_id=item.claim_id,
-                        order_id=order_id,
                         error="Already claimed (insufficient balance)",
                         retryable=False,
                         started_at=started_at,
@@ -129,149 +216,30 @@ class ClaimExecutor:
                 return ClaimResult(
                     success=False,
                     claim_id=item.claim_id,
-                    order_id=order_id,
-                    error=error,
+                    error=str(error),
                     retryable=True,
                     started_at=started_at,
                 )
 
         except Exception as e:
-            log.error(f"Error claiming {item.claim_id}: {e}")
+            error_msg = str(e)
+            log.error(f"Error claiming {item.claim_id}: {error_msg}")
+
+            # Check for specific errors
+            error_lower = error_msg.lower()
+            if "insufficient" in error_lower or "balance" in error_lower:
+                return ClaimResult(
+                    success=True,
+                    claim_id=item.claim_id,
+                    error="Already claimed (insufficient balance)",
+                    retryable=False,
+                    started_at=started_at,
+                )
+
             return ClaimResult(
                 success=False,
                 claim_id=item.claim_id,
-                error=str(e),
+                error=error_msg,
                 retryable=True,
                 started_at=started_at,
             )
-
-    async def _create_sell_order(self, item: ClaimItem) -> Optional[dict]:
-        """
-        Create a SELL order at the configured price.
-        """
-        try:
-            url = f"{self.config.clob_base_url}/order"
-
-            # Order payload (must use camelCase like bot/trader.py)
-            # Note: funder is NOT included in body (it's in headers/auth)
-            order_data = {
-                "tokenID": item.token_id,
-                "side": "SELL",
-                "price": str(self.config.sell_price),
-                "size": str(item.shares),
-                "orderType": "LIMIT",
-            }
-
-            # Use same JSON format as bot/trader.py (no spaces, consistent)
-            body = json.dumps(order_data, separators=(',', ':'))
-            headers = self._get_auth_headers("POST", "/order", body)
-            headers["Content-Type"] = "application/json"
-
-            log.debug(f"Creating SELL order: {order_data}")
-
-            resp = await self.client.post(url, content=body, headers=headers)
-
-            if resp.status_code in (200, 201):
-                result = resp.json()
-                log.info(f"Order created: {result.get('order_id', result.get('id'))}")
-                return result
-
-            log.error(f"Order creation failed: {resp.status_code} - {resp.text}")
-            return None
-
-        except Exception as e:
-            log.error(f"Error creating SELL order: {e}")
-            return None
-
-    async def _wait_for_fill(self, order_id: str, timeout: int = 30) -> dict:
-        """
-        Wait for an order to be filled.
-
-        For resolved markets, this should be nearly instant.
-        """
-        if not order_id or order_id == "DRY_RUN":
-            return {"filled": True, "dry_run": True}
-
-        start = time.time()
-        poll_interval = 1.0  # Check every second
-
-        while time.time() - start < timeout:
-            try:
-                url = f"{self.config.clob_base_url}/order/{order_id}"
-                headers = self._get_auth_headers("GET", f"/order/{order_id}")
-
-                resp = await self.client.get(url, headers=headers)
-
-                if resp.status_code == 200:
-                    order = resp.json()
-                    status = order.get("status", "").lower()
-
-                    if status in ("filled", "matched", "completed"):
-                        return {
-                            "filled": True,
-                            "amount": order.get("filled_size") or order.get("size"),
-                            "price": order.get("avg_price") or order.get("price"),
-                        }
-
-                    if status in ("cancelled", "rejected", "expired"):
-                        return {
-                            "filled": False,
-                            "error": f"Order {status}",
-                        }
-
-                    # Still open, keep waiting
-                    log.debug(f"Order {order_id} status: {status}")
-
-                elif resp.status_code == 404:
-                    # Order might have been filled and removed
-                    return {"filled": True, "note": "Order not found (possibly filled)"}
-
-                await asyncio.sleep(poll_interval)
-
-            except Exception as e:
-                log.warning(f"Error checking order status: {e}")
-                await asyncio.sleep(poll_interval)
-
-        return {"filled": False, "error": "Timeout waiting for fill"}
-
-    async def cancel_order(self, order_id: str) -> bool:
-        """
-        Cancel an unfilled order.
-        """
-        try:
-            url = f"{self.config.clob_base_url}/order/{order_id}"
-            headers = self._get_auth_headers("DELETE", f"/order/{order_id}")
-
-            resp = await self.client.delete(url, headers=headers)
-
-            if resp.status_code in (200, 204):
-                log.info(f"Order {order_id} cancelled")
-                return True
-
-            log.warning(f"Failed to cancel order: {resp.status_code}")
-            return False
-
-        except Exception as e:
-            log.error(f"Error cancelling order: {e}")
-            return False
-
-    def _get_auth_headers(self, method: str, path: str, body: str = "") -> dict:
-        """Generate authentication headers for CLOB API."""
-        if not self.config.api_key or not self.config.api_secret:
-            log.warning("API credentials not configured")
-            return {}
-
-        timestamp = str(int(time.time() * 1000))
-        message = f"{timestamp}{method}{path}{body}"
-
-        signature = hmac.new(
-            self.config.api_secret.encode(),
-            message.encode(),
-            hashlib.sha256
-        ).hexdigest()
-
-        return {
-            "POLY_API_KEY": self.config.api_key,
-            "POLY_TIMESTAMP": timestamp,
-            "POLY_SIGNATURE": signature,
-        }
