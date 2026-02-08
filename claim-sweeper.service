@@ -1,0 +1,28 @@
+[Unit]
+Description=Polymarket Claim Sweeper
+Documentation=https://github.com/Leandrosmoreira/bookpoly
+After=network.target bot-main.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/root/bookpoly
+Environment="PATH=/root/bookpoly/venv/bin:/usr/local/bin:/usr/bin:/bin"
+EnvironmentFile=/root/bookpoly/.env
+ExecStart=/root/bookpoly/venv/bin/python -m claims.loop
+Restart=always
+RestartSec=30
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=claim-sweeper
+
+# Security
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/root/bookpoly/data /root/bookpoly/logs
+
+[Install]
+WantedBy=multi-user.target
