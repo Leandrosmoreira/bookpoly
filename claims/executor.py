@@ -1,28 +1,35 @@
 """
 Claim Executor - Redeems winning positions using polymarket-apis.
 
-For resolved markets, the orderbook is closed so we can't use SELL@0.99.
-Instead, we use the on-chain redeem_position function via polymarket-apis
-which supports Magic email accounts (signature_type=1).
+Uses PolymarketGaslessWeb3Client which sends transactions through
+Polymarket's relayer - NO GAS FEES required!
 
-This requires some POL (MATIC) in the wallet to pay for gas fees.
+For Magic email accounts (signature_type=1), this is the recommended approach.
 """
 import logging
 import time
-from typing import Optional
+from typing import Optional, Union
 
 from claims.config import ClaimConfig
 from claims.models import ClaimItem, ClaimResult
 
 log = logging.getLogger(__name__)
 
-# Import polymarket-apis for on-chain redemption
-POLYMARKET_APIS_AVAILABLE = False
+# Import polymarket-apis for gasless redemption
+GASLESS_AVAILABLE = False
+ONCHAIN_AVAILABLE = False
+
+try:
+    from polymarket_apis import PolymarketGaslessWeb3Client
+    GASLESS_AVAILABLE = True
+except ImportError as e:
+    log.warning(f"PolymarketGaslessWeb3Client not available: {e}")
+
 try:
     from polymarket_apis import PolymarketWeb3Client
-    POLYMARKET_APIS_AVAILABLE = True
+    ONCHAIN_AVAILABLE = True
 except ImportError as e:
-    log.warning(f"polymarket-apis not installed: {e}. Run: pip install polymarket-apis")
+    log.warning(f"PolymarketWeb3Client not available: {e}")
 
 # Import py-clob-client for SELL@0.99 workaround (backup method)
 PY_CLOB_AVAILABLE = False
@@ -39,31 +46,30 @@ class ClaimExecutor:
     """
     Executes claims for winning positions in resolved markets.
 
-    Two methods available:
-    1. On-chain redeem (primary): Uses polymarket-apis to call redeemPositions
-       on the CTF contract. This is the proper way for resolved markets.
-       Requires POL for gas.
+    Methods available (in order of preference):
+    1. Gasless redeem (primary): Uses Polymarket relayer - NO GAS NEEDED!
+    2. On-chain redeem (fallback): Direct on-chain, requires POL for gas
+    3. SELL@0.99 (last resort): Only works if orderbook still open
 
-    2. SELL@0.99 (fallback): If orderbook is still active, sells at 0.99.
-       Only works briefly after resolution before orderbook closes.
-
-    For Magic email accounts (signature_type=1), uses PolymarketWeb3Client.
+    For Magic email accounts (signature_type=1), uses gasless client.
     """
 
     def __init__(self, config: ClaimConfig):
         self.config = config
-        self.web3_client: Optional[PolymarketWeb3Client] = None
-        self.clob_client: Optional[ClobClient] = None
+        self.gasless_client = None
+        self.web3_client = None
+        self.clob_client = None
+        self._gasless_initialized = False
         self._web3_initialized = False
         self._clob_initialized = False
 
-    def _ensure_web3_initialized(self) -> bool:
-        """Initialize polymarket-apis Web3 client if not already done."""
-        if self._web3_initialized:
+    def _ensure_gasless_initialized(self) -> bool:
+        """Initialize gasless Web3 client (uses Polymarket relayer - no gas!)."""
+        if self._gasless_initialized:
             return True
 
-        if not POLYMARKET_APIS_AVAILABLE:
-            log.warning("polymarket-apis not available")
+        if not GASLESS_AVAILABLE:
+            log.warning("PolymarketGaslessWeb3Client not available")
             return False
 
         if not self.config.private_key:
@@ -75,22 +81,54 @@ class ClaimExecutor:
             if private_key.startswith("0x"):
                 private_key = private_key[2:]
 
-            # Initialize with Magic email signature type (1)
-            self.web3_client = PolymarketWeb3Client(
+            # Initialize gasless client with Magic email signature type (1)
+            self.gasless_client = PolymarketGaslessWeb3Client(
                 private_key=private_key,
                 signature_type=self.config.signature_type,  # 1 = Magic/Email
-                chain_id=self.config.chain_id,  # 137 = Polygon mainnet
+                chain_id=self.config.chain_id,
+            )
+
+            self._gasless_initialized = True
+            log.info("PolymarketGaslessWeb3Client initialized - NO GAS FEES!")
+            return True
+
+        except Exception as e:
+            log.error(f"Failed to initialize PolymarketGaslessWeb3Client: {e}")
+            return False
+
+    def _ensure_web3_initialized(self) -> bool:
+        """Initialize on-chain Web3 client (requires POL for gas)."""
+        if self._web3_initialized:
+            return True
+
+        if not ONCHAIN_AVAILABLE:
+            log.warning("PolymarketWeb3Client not available")
+            return False
+
+        if not self.config.private_key:
+            log.error("POLYMARKET_PRIVATE_KEY not set")
+            return False
+
+        try:
+            private_key = self.config.private_key
+            if private_key.startswith("0x"):
+                private_key = private_key[2:]
+
+            self.web3_client = PolymarketWeb3Client(
+                private_key=private_key,
+                signature_type=self.config.signature_type,
+                chain_id=self.config.chain_id,
             )
 
             self._web3_initialized = True
-            log.info("PolymarketWeb3Client initialized successfully")
+            log.info("PolymarketWeb3Client initialized (requires POL for gas)")
 
-            # Check POL balance for gas
+            # Check POL balance
             try:
                 pol_balance = self.web3_client.get_pol_balance()
-                log.info(f"POL balance: {pol_balance} (for gas fees)")
+                log.info(f"POL balance: {pol_balance}")
                 if pol_balance < 0.01:
-                    log.warning("Low POL balance! You need POL to pay gas for redemptions")
+                    log.warning("Low POL balance for on-chain transactions")
             except Exception as e:
                 log.warning(f"Could not check POL balance: {e}")
 
@@ -101,17 +139,14 @@ class ClaimExecutor:
             return False
 
     def _ensure_clob_initialized(self) -> bool:
-        """Initialize py-clob-client if not already done."""
+        """Initialize py-clob-client for SELL workaround."""
         if self._clob_initialized:
             return True
 
         if not PY_CLOB_AVAILABLE:
             return False
 
-        if not self.config.private_key:
-            return False
-
-        if not self.config.funder:
+        if not self.config.private_key or not self.config.funder:
             return False
 
         try:
@@ -136,7 +171,7 @@ class ClaimExecutor:
                 self.clob_client.set_api_creds(creds)
 
             self._clob_initialized = True
-            log.info("ClobClient initialized (fallback for SELL@0.99)")
+            log.info("ClobClient initialized (SELL@0.99 fallback)")
             return True
 
         except Exception as e:
@@ -151,9 +186,10 @@ class ClaimExecutor:
         """
         Execute a claim for the given item.
 
-        Strategy:
-        1. Try on-chain redeem via polymarket-apis (proper method)
-        2. If that fails, try SELL@0.99 workaround (might work if orderbook still open)
+        Strategy (in order):
+        1. Try gasless redeem via Polymarket relayer (FREE!)
+        2. Try on-chain redeem (requires POL for gas)
+        3. Try SELL@0.99 workaround (if orderbook still open)
         """
         started_at = int(time.time())
 
@@ -179,78 +215,81 @@ class ClaimExecutor:
                 success=True,
                 claim_id=item.claim_id,
                 order_id="DRY_RUN",
-                amount_received=item.shares,  # Full value on redeem
-                fee_paid=0.0,  # No fee for on-chain redeem
+                amount_received=item.shares,
+                fee_paid=0.0,
                 dry_run=True,
                 started_at=started_at,
             )
 
-        # Try on-chain redemption first
-        result = await self._try_onchain_redeem(item, started_at)
+        # 1. Try gasless redeem first (NO GAS FEES!)
+        result = await self._try_gasless_redeem(item, started_at)
         if result.success:
             return result
 
-        # If on-chain failed with "orderbook does not exist", it means
-        # the market is fully resolved - on-chain redeem should have worked
-        # Try SELL@0.99 as fallback only if orderbook might still be open
+        # 2. Try on-chain redeem if gasless failed
+        if "gasless" in str(result.error).lower() or "relayer" in str(result.error).lower():
+            log.info("Gasless failed, trying on-chain redeem...")
+            onchain_result = await self._try_onchain_redeem(item, started_at)
+            if onchain_result.success:
+                return onchain_result
+            result = onchain_result
+
+        # 3. Try SELL@0.99 as last resort
         if "orderbook" not in str(result.error).lower():
             log.info("Trying SELL@0.99 fallback...")
-            fallback_result = await self._try_sell_workaround(item, started_at)
-            if fallback_result.success:
-                return fallback_result
+            sell_result = await self._try_sell_workaround(item, started_at)
+            if sell_result.success:
+                return sell_result
 
         return result
 
-    async def _try_onchain_redeem(self, item: ClaimItem, started_at: int) -> ClaimResult:
-        """Try to redeem position on-chain using polymarket-apis."""
-        if not self._ensure_web3_initialized():
+    async def _try_gasless_redeem(self, item: ClaimItem, started_at: int) -> ClaimResult:
+        """Try to redeem using Polymarket's gasless relayer (FREE!)."""
+        if not self._ensure_gasless_initialized():
             return ClaimResult(
                 success=False,
                 claim_id=item.claim_id,
-                error="Failed to initialize Web3 client (polymarket-apis)",
+                error="Failed to initialize gasless client",
                 retryable=True,
                 started_at=started_at,
             )
 
         try:
-            log.info(f"Redeeming on-chain: {item.shares:.4f} shares of {item.market_slug}")
+            log.info(f"Gasless redeem: {item.shares:.4f} shares of {item.market_slug}")
 
-            # Get condition_id from market_id
             condition_id = item.market_id
 
             # Build amounts array based on outcome_index
-            # [x, y] where x is first outcome shares, y is second outcome shares
             if item.outcome_index == 0:
                 amounts = [item.shares, 0.0]
             else:
                 amounts = [0.0, item.shares]
 
-            log.info(f"Calling redeem_position: condition={condition_id[:16]}..., amounts={amounts}, neg_risk={item.neg_risk}")
+            log.info(f"Calling gasless redeem_position: condition={condition_id[:16]}..., amounts={amounts}")
 
-            # Call redeem_position
-            tx_receipt = self.web3_client.redeem_position(
+            # Call redeem_position via gasless client
+            tx_receipt = self.gasless_client.redeem_position(
                 condition_id=condition_id,
                 amounts=amounts,
                 neg_risk=item.neg_risk,
             )
 
             tx_hash = tx_receipt.transaction_hash if hasattr(tx_receipt, 'transaction_hash') else str(tx_receipt)
-            log.info(f"Redemption tx submitted: {tx_hash}")
+            log.info(f"Gasless redemption successful! TX: {tx_hash}")
 
             return ClaimResult(
                 success=True,
                 claim_id=item.claim_id,
                 order_id=str(tx_hash),
-                amount_received=item.shares,  # Full value
-                fee_paid=0.0,  # Gas paid separately in POL
+                amount_received=item.shares,
+                fee_paid=0.0,  # NO GAS FEES!
                 started_at=started_at,
             )
 
         except Exception as e:
             error_msg = str(e)
-            log.error(f"On-chain redeem failed: {error_msg}")
+            log.error(f"Gasless redeem failed: {error_msg}")
 
-            # Check if already redeemed
             if "already redeemed" in error_msg.lower() or "nothing to redeem" in error_msg.lower():
                 return ClaimResult(
                     success=True,
@@ -260,12 +299,73 @@ class ClaimExecutor:
                     started_at=started_at,
                 )
 
-            # Check for insufficient gas
+            return ClaimResult(
+                success=False,
+                claim_id=item.claim_id,
+                error=error_msg,
+                retryable=True,
+                started_at=started_at,
+            )
+
+    async def _try_onchain_redeem(self, item: ClaimItem, started_at: int) -> ClaimResult:
+        """Try on-chain redeem (requires POL for gas)."""
+        if not self._ensure_web3_initialized():
+            return ClaimResult(
+                success=False,
+                claim_id=item.claim_id,
+                error="Failed to initialize Web3 client",
+                retryable=True,
+                started_at=started_at,
+            )
+
+        try:
+            log.info(f"On-chain redeem: {item.shares:.4f} shares of {item.market_slug}")
+
+            condition_id = item.market_id
+
+            if item.outcome_index == 0:
+                amounts = [item.shares, 0.0]
+            else:
+                amounts = [0.0, item.shares]
+
+            log.info(f"Calling on-chain redeem_position: condition={condition_id[:16]}...")
+
+            tx_receipt = self.web3_client.redeem_position(
+                condition_id=condition_id,
+                amounts=amounts,
+                neg_risk=item.neg_risk,
+            )
+
+            tx_hash = tx_receipt.transaction_hash if hasattr(tx_receipt, 'transaction_hash') else str(tx_receipt)
+            log.info(f"On-chain redemption successful! TX: {tx_hash}")
+
+            return ClaimResult(
+                success=True,
+                claim_id=item.claim_id,
+                order_id=str(tx_hash),
+                amount_received=item.shares,
+                fee_paid=0.0,
+                started_at=started_at,
+            )
+
+        except Exception as e:
+            error_msg = str(e)
+            log.error(f"On-chain redeem failed: {error_msg}")
+
+            if "already redeemed" in error_msg.lower() or "nothing to redeem" in error_msg.lower():
+                return ClaimResult(
+                    success=True,
+                    claim_id=item.claim_id,
+                    error="Already redeemed",
+                    retryable=False,
+                    started_at=started_at,
+                )
+
             if "insufficient" in error_msg.lower() and "funds" in error_msg.lower():
                 return ClaimResult(
                     success=False,
                     claim_id=item.claim_id,
-                    error="Insufficient POL for gas. Send POL to your wallet.",
+                    error="Insufficient POL for gas",
                     retryable=False,
                     started_at=started_at,
                 )
@@ -284,13 +384,13 @@ class ClaimExecutor:
             return ClaimResult(
                 success=False,
                 claim_id=item.claim_id,
-                error="CLOB client not available for SELL workaround",
+                error="CLOB client not available",
                 retryable=False,
                 started_at=started_at,
             )
 
         try:
-            log.info(f"Creating SELL order: {item.shares:.4f} shares @ ${self.config.sell_price}")
+            log.info(f"SELL@0.99: {item.shares:.4f} shares @ ${self.config.sell_price}")
 
             order_args = OrderArgs(
                 token_id=item.token_id,
