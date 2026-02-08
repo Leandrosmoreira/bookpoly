@@ -74,7 +74,7 @@ def compute_microprice(bids: list[dict], asks: list[dict], levels: int = 3) -> f
     return total_value / total_size
 
 
-def compute_simple_microprice(best_bid: float, best_ask: float,
+def compute_simple_microprice(best_bid: float | None, best_ask: float | None,
                                bid_size: float, ask_size: float) -> float:
     """
     Compute simple microprice using only best bid/ask.
@@ -84,6 +84,14 @@ def compute_simple_microprice(best_bid: float, best_ask: float,
     This weights the price toward the side with MORE liquidity,
     since that side is "stronger" and less likely to move.
     """
+    # Handle None values
+    if best_bid is None and best_ask is None:
+        return 0.0
+    if best_bid is None:
+        return best_ask if best_ask is not None else 0.0
+    if best_ask is None:
+        return best_bid
+    
     total_size = bid_size + ask_size
     if total_size == 0:
         return (best_bid + best_ask) / 2
@@ -183,12 +191,12 @@ def compute_microstructure(
     yes_data = polymarket_data.get("yes", {}) or {}
 
     # Extract basic data
-    mid = yes_data.get("mid", 0)
-    spread = yes_data.get("spread", 0)
-    bid_depth = yes_data.get("bid_depth", 0)
-    ask_depth = yes_data.get("ask_depth", 0)
-    best_bid = yes_data.get("best_bid", 0)
-    best_ask = yes_data.get("best_ask", 0)
+    mid = yes_data.get("mid", 0) or 0
+    spread = yes_data.get("spread", 0) or 0
+    bid_depth = yes_data.get("bid_depth", 0) or 0
+    ask_depth = yes_data.get("ask_depth", 0) or 0
+    best_bid = yes_data.get("best_bid") or 0
+    best_ask = yes_data.get("best_ask") or 0
 
     # Get order book levels
     bids = yes_data.get("bids", []) or []
