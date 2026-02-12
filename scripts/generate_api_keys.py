@@ -25,7 +25,6 @@ from dotenv import load_dotenv
 
 try:
     from eth_account import Account
-    from eth_account.messages import encode_typed_data
 except ImportError:
     print("ERRO: eth-account nao instalado")
     print("Execute: pip install eth-account")
@@ -35,51 +34,62 @@ except ImportError:
 # Configuracoes
 CLOB_HOST = "https://clob.polymarket.com"
 CHAIN_ID = 137  # Polygon
+L1_MESSAGE = "This message attests that I control the given wallet"
 
 
-def create_l1_auth_headers(private_key: str, nonce: int = 0) -> dict:
+def get_server_timestamp() -> int:
+    """Obtem timestamp do servidor CLOB (recomendado pela doc para L1 auth)."""
+    with httpx.Client(timeout=10) as client:
+        resp = client.get(f"{CLOB_HOST}/time")
+        resp.raise_for_status()
+        return int(float(resp.text.strip()))
+
+
+def create_l1_auth_headers(private_key: str, nonce: int = 0, timestamp: int | None = None) -> dict:
     """
     Cria headers de autenticacao L1 usando EIP-712.
 
     A assinatura e feita LOCALMENTE - a private key nunca sai da maquina.
+    Usa timestamp do servidor CLOB quando disponivel (evita 401 por relogio desincronizado).
     """
     account = Account.from_key(private_key)
     address = account.address
-    timestamp = int(time.time())
+    if timestamp is None:
+        try:
+            timestamp = get_server_timestamp()
+        except Exception:
+            timestamp = int(time.time())
 
-    # Estrutura EIP-712 para autenticacao Polymarket
-    typed_data = {
-        "types": {
-            "EIP712Domain": [
-                {"name": "name", "type": "string"},
-                {"name": "version", "type": "string"},
-                {"name": "chainId", "type": "uint256"},
-            ],
-            "ClobAuth": [
-                {"name": "address", "type": "address"},
-                {"name": "timestamp", "type": "string"},
-                {"name": "nonce", "type": "uint256"},
-            ]
-        },
-        "primaryType": "ClobAuth",
-        "domain": {
-            "name": "ClobAuthDomain",
-            "version": "1",
-            "chainId": CHAIN_ID,
-        },
-        "message": {
-            "address": address,
-            "timestamp": str(timestamp),
-            "nonce": nonce,
-        }
+    domain_data = {
+        "name": "ClobAuthDomain",
+        "version": "1",
+        "chainId": CHAIN_ID,
+    }
+    message_types = {
+        "ClobAuth": [
+            {"name": "address", "type": "address"},
+            {"name": "timestamp", "type": "string"},
+            {"name": "nonce", "type": "uint256"},
+            {"name": "message", "type": "string"},
+        ],
+    }
+    message_data = {
+        "address": address,
+        "timestamp": str(timestamp),
+        "nonce": nonce,
+        "message": L1_MESSAGE,
     }
 
-    # Assinar localmente com eth-account
-    encoded = encode_typed_data(full_message=typed_data)
-    signed = account.sign_message(encoded)
-    signature = signed.signature.hex()
+    # Assinar com sign_typed_data (EIP-712) - formato esperado pela API
+    signed = Account.sign_typed_data(
+        private_key,
+        domain_data,
+        message_types,
+        message_data,
+    )
+    sig_hex = signed.signature.hex()
+    signature = sig_hex if sig_hex.startswith("0x") else "0x" + sig_hex
 
-    # Headers L1
     return {
         "POLY_ADDRESS": address,
         "POLY_SIGNATURE": signature,
