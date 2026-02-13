@@ -40,73 +40,105 @@ GAMMA_HOST = "https://gamma-api.polymarket.com"
 MIN_SHARES = 5
 
 
+# Janela 15min em segundos
+WINDOW_SECONDS = 900
+
+
+def _current_window_ts() -> int:
+    """Timestamp do inicio da janela 15min atual."""
+    return int(time.time() // WINDOW_SECONDS) * WINDOW_SECONDS
+
+
+def _get_signer_address() -> str:
+    """Endereco do signer (EOA) para headers L2. CLOB exige POLY_ADDRESS."""
+    from eth_account import Account
+    pk = os.getenv("POLYMARKET_PRIVATE_KEY", "")
+    if not pk:
+        return ""
+    if not pk.startswith("0x"):
+        pk = f"0x{pk}"
+    return Account.from_key(pk).address
+
+
 def sign_request(api_secret: str, method: str, path: str, body: str = "") -> dict:
     """
-    Assina request com HMAC-SHA256.
-
-    A assinatura e feita LOCALMENTE - nenhum dado sensivel sai da maquina.
+    Assina request com HMAC-SHA256 (L2), igual ao py-clob-client.
+    Secret em base64 url-safe; assinatura retornada em base64 url-safe.
     """
+    import base64
     timestamp = str(int(time.time() * 1000))
-    message = f"{timestamp}{method}{path}{body}"
+    message = timestamp + method + path
+    if body:
+        message += body.replace("'", '"')
 
-    signature = hmac.new(
-        api_secret.encode(),
-        message.encode(),
-        hashlib.sha256
-    ).hexdigest()
+    try:
+        secret_bytes = base64.urlsafe_b64decode(api_secret)
+    except Exception:
+        secret_bytes = api_secret.encode()
 
-    return {
+    h = hmac.new(secret_bytes, message.encode("utf-8"), hashlib.sha256)
+    signature_b64 = base64.urlsafe_b64encode(h.digest()).decode("utf-8")
+
+    headers = {
+        "POLY_ADDRESS": _get_signer_address(),
         "POLY_API_KEY": os.getenv("POLYMARKET_API_KEY"),
         "POLY_TIMESTAMP": timestamp,
-        "POLY_SIGNATURE": signature,
+        "POLY_SIGNATURE": signature_b64,
+        "POLY_PASSPHRASE": os.getenv("POLYMARKET_PASSPHRASE", ""),
         "Content-Type": "application/json",
     }
+    return headers
 
 
 def find_btc_15min_market() -> dict | None:
     """
-    Busca o mercado BTC 15min ativo no momento.
-
-    Usa a API publica Gamma (nao precisa autenticacao).
+    Busca o mercado BTC 15min ativo via slug (mesmo metodo do recorder).
+    Slug: btc-updown-15m-{window_ts}
     """
-    print("Buscando mercado BTC 15min ativo...")
+    window_ts = _current_window_ts()
+    slug = f"btc-updown-15m-{window_ts}"
+    print(f"Buscando mercado BTC 15min (slug: {slug})...")
 
     with httpx.Client(timeout=30) as client:
-        # Buscar mercados BTC ativos
-        response = client.get(
-            f"{GAMMA_HOST}/markets",
-            params={
-                "active": "true",
-                "closed": "false",
-            }
-        )
+        response = client.get(f"{GAMMA_HOST}/events/slug/{slug}")
 
+        if response.status_code == 404:
+            print("Mercado ainda nao existe nesta janela (404). Tente em alguns segundos.")
+            return None
         if response.status_code != 200:
-            print(f"Erro ao buscar mercados: {response.status_code}")
+            print(f"Erro Gamma: {response.status_code}")
             return None
 
-        markets = response.json()
+        event = response.json()
+        markets = event.get("markets", [])
+        if not markets:
+            print("Evento sem markets")
+            return None
 
-        # Filtrar por BTC 15min
-        for market in markets:
-            question = market.get("question", "").lower()
+        market = markets[0]
+        raw = market.get("clobTokenIds")
+        if isinstance(raw, str):
+            import json
+            try:
+                tokens = json.loads(raw)
+            except json.JSONDecodeError:
+                print("clobTokenIds invalido")
+                return None
+        else:
+            tokens = raw or []
+        if len(tokens) < 2:
+            print("Mercado sem 2 tokens")
+            return None
 
-            # Procurar por mercados BTC 15 minutos
-            if "bitcoin" in question or "btc" in question:
-                if "15" in question and ("minute" in question or "min" in question):
-                    print(f"Mercado encontrado: {market.get('question')}")
-                    return market
-
-        # Se nao encontrou 15min, tentar 5min
-        for market in markets:
-            question = market.get("question", "").lower()
-            if "bitcoin" in question or "btc" in question:
-                if "5" in question and ("minute" in question or "min" in question):
-                    print(f"Mercado alternativo (5min): {market.get('question')}")
-                    return market
-
-        print("Nenhum mercado BTC de curto prazo encontrado")
-        return None
+        # Retornar no formato esperado pelo main: token_id YES = primeiro
+        print(f"Mercado encontrado: {event.get('title', slug)}")
+        return {
+            "question": event.get("title", slug),
+            "tokens": [
+                {"token_id": tokens[0], "outcome": "YES"},
+                {"token_id": tokens[1], "outcome": "NO"},
+            ],
+        }
 
 
 def get_orderbook(token_id: str) -> dict | None:

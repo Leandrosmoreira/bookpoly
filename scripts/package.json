@@ -1,0 +1,14 @@
+{
+  "name": "bookpoly-order-script",
+  "version": "1.0.0",
+  "description": "Place limit order via Polymarket CLOB (Node client)",
+  "type": "module",
+  "scripts": {
+    "order": "node place_order_limit_node.mjs"
+  },
+  "dependencies": {
+    "@polymarket/clob-client": "^5.2.0",
+    "ethers": "^5.7.2",
+    "dotenv": "^16.0.0"
+  }
+}

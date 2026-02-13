@@ -56,24 +56,29 @@ ERC20_ABI = [
 
 
 def get_wallet_address() -> str:
-    """Obtem endereco da carteira do .env."""
-    # Tentar POLYMARKET_WALLET primeiro
+    """Obtem endereco da carteira do .env.
+
+    No Polymarket o saldo (USDC) fica na carteira PROXY (funder), nao na EOA.
+    Por isso priorizamos POLYMARKET_WALLET e POLYMARKET_FUNDER para bater
+    com o valor mostrado no site (Portfolio/Cash).
+    """
+    # 1) Endereco explicito (ex.: proxy/funder que aparece no site)
     wallet = os.getenv("POLYMARKET_WALLET")
     if wallet:
         return Web3.to_checksum_address(wallet)
 
-    # Tentar derivar de POLYMARKET_PRIVATE_KEY
+    # 2) Funder = proxy onde esta o saldo (recomendado para bater com Polymarket UI)
+    funder = os.getenv("POLYMARKET_FUNDER")
+    if funder:
+        return Web3.to_checksum_address(funder)
+
+    # 3) EOA derivada da private key (saldo costuma ser 0; o dinheiro esta no proxy)
     private_key = os.getenv("POLYMARKET_PRIVATE_KEY")
     if private_key:
         if not private_key.startswith("0x"):
             private_key = f"0x{private_key}"
         account = Account.from_key(private_key)
         return account.address
-
-    # Tentar POLYMARKET_FUNDER
-    funder = os.getenv("POLYMARKET_FUNDER")
-    if funder:
-        return Web3.to_checksum_address(funder)
 
     return None
 
