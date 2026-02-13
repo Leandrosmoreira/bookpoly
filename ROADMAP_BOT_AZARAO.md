@@ -22,6 +22,21 @@ Criar um bot que entra nos **últimos 4 minutos** da janela de 15min, **apostand
 
 ---
 
+## Status do Projeto (atualizado)
+
+| Item | Status |
+|------|--------|
+| **Git** | Repo atualizado com `git pull`: commit `07dd164` (Add balance checker script) + `6dd87a1` (teste ordem limit). Testes executados localmente. |
+| **Gerador de API keys** | ✅ Corrigido e funcional. `scripts/generate_api_keys.py` usa timestamp do servidor CLOB, `sign_typed_data` (EIP-712) e campo `message` na ClobAuth. Credenciais L2 (apiKey, secret, passphrase) geradas com sucesso. |
+| **Verificação de saldo** | ✅ `scripts/check_balance.py` — testado OK. Mostra USDC e POL on-chain, posições abertas (Data API), valor total. Não precisa de API keys. |
+| **Teste ordem limit** | ✅ `scripts/test_order_limit.py` — testado. Ordem limit POST-ONLY (maker); usa HMAC L2. Falha apenas quando não há mercado BTC 15min ativo na Gamma (depende de mercados abertos). |
+| **Fase 0** | ✅ Coleta de dados em produção. |
+| **Fases 1–4** | Gates, microestrutura, estado, scorer implementados. |
+| **Fase 5** | Backtester disponível. |
+| **Fase 6** | Execução: API keys (gerador pronto), check balance e teste de ordem limit disponíveis; paper trading antes de real. |
+
+---
+
 # FASE 0 — Coleta de Dados ✅ CONCLUÍDA
 
 ## O que já temos rodando
@@ -532,7 +547,7 @@ backtest/
 
 ## ⚠️ ATENÇÃO
 Esta fase requer:
-- API keys da Polymarket
+- API keys da Polymarket (**gerador pronto**: `python scripts/generate_api_keys.py` — L1 auth corrigido)
 - Carteira com fundos
 - Testes exaustivos em paper trading primeiro
 
