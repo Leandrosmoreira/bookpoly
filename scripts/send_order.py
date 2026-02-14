@@ -124,8 +124,6 @@ def main():
     try:
         resp = client.create_and_post_order(
             OrderArgs(token_id=token_id, price=price, size=float(MIN_SHARES), side=BUY),
-            order_type=OrderType.GTC,
-            neg_risk=False,
         )
         print("\nSUCESSO!")
         print(json.dumps(resp, indent=2))
