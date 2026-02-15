@@ -5,18 +5,25 @@ SECURITY: This module uses ONLY official Ethereum libraries.
 No third-party polymarket wrappers that could leak credentials.
 """
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from dotenv import load_dotenv
 
 load_dotenv()
+
+try:
+    from polygon_rpc import get_polygon_rpc_list
+except ImportError:
+    def get_polygon_rpc_list():
+        return [os.getenv("POLYGON_RPC", "https://polygon-rpc.com")]
 
 
 # Polygon Mainnet Contract Addresses (official, verified on PolygonScan)
 CTF_ADDRESS = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
 USDC_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
 
-# Network
-POLYGON_RPC = os.getenv("POLYGON_RPC", "https://polygon-rpc.com")
+# Network: lista de RPCs para fallback em rate limit
+POLYGON_RPC_URLS = get_polygon_rpc_list()
+POLYGON_RPC = POLYGON_RPC_URLS[0] if POLYGON_RPC_URLS else "https://polygon-rpc.com"
 CHAIN_ID = 137
 
 # Data API (public, no auth needed)
@@ -31,16 +38,16 @@ class ClaimConfig:
     private_key: str = ""
     wallet_address: str = ""  # Proxy wallet (funder)
 
-    # Network
+    # Network: primeiro RPC; lista completa em rpc_urls para fallback
     rpc_url: str = POLYGON_RPC
+    rpc_urls: list = field(default_factory=get_polygon_rpc_list)
     chain_id: int = CHAIN_ID
 
     # Contracts
     ctf_address: str = CTF_ADDRESS
     usdc_address: str = USDC_ADDRESS
 
-    # Options
-    dry_run: bool = True
+    # Options (sempre LIVE; dry_run removido)
     gas_limit: int = 300000
 
     def __post_init__(self):

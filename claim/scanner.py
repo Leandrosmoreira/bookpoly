@@ -66,20 +66,15 @@ class PositionScanner:
                 "limit": "100"
             }
 
-            log.info(f"Scanning positions for {self.config.wallet_address[:10]}...")
-
             resp = self.client.get(url, params=params)
             resp.raise_for_status()
 
             positions = resp.json()
-            log.info(f"Found {len(positions)} redeemable positions")
-
             result = []
             for pos in positions:
                 item = self._parse_position(pos)
                 if item:
                     result.append(item)
-                    log.info(f"  - {item.market_slug}: {item.shares:.2f} shares ({item.outcome})")
 
             return result
 

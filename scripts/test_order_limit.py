@@ -14,8 +14,9 @@ USO:
     python scripts/test_order_limit.py
 
 REQUISITOS:
-    - POLYMARKET_API_KEY no .env
-    - POLYMARKET_API_SECRET no .env
+    - POLYMARKET_API_KEY, POLYMARKET_API_SECRET, POLYMARKET_PASSPHRASE no .env
+    - POLYMARKET_PRIVATE_KEY e POLYMARKET_FUNDER no .env (para ordem assinada)
+    - pip install py-clob-client (criar/assinar ordem no formato CLOB)
     - Saldo USDC na conta
 """
 
@@ -60,13 +61,15 @@ def _get_signer_address() -> str:
     return Account.from_key(pk).address
 
 
-def sign_request(api_secret: str, method: str, path: str, body: str = "") -> dict:
+def sign_request(api_secret: str, method: str, path: str, body: str = "", poly_address: str | None = None) -> dict:
     """
     Assina request com HMAC-SHA256 (L2), igual ao py-clob-client.
     Secret em base64 url-safe; assinatura retornada em base64 url-safe.
+    Timestamp em segundos (como no place_order_limit_clob).
+    Para signature_type=1 (magic email): poly_address deve ser o FUNDER (proxy).
     """
     import base64
-    timestamp = str(int(time.time() * 1000))
+    timestamp = str(int(time.time()))
     message = timestamp + method + path
     if body:
         message += body.replace("'", '"')
@@ -79,8 +82,12 @@ def sign_request(api_secret: str, method: str, path: str, body: str = "") -> dic
     h = hmac.new(secret_bytes, message.encode("utf-8"), hashlib.sha256)
     signature_b64 = base64.urlsafe_b64encode(h.digest()).decode("utf-8")
 
+    address = (poly_address or _get_signer_address()).strip()
+    if address and not address.startswith("0x"):
+        address = f"0x{address}" if len(address) == 40 else address
+
     headers = {
-        "POLY_ADDRESS": _get_signer_address(),
+        "POLY_ADDRESS": address,
         "POLY_API_KEY": os.getenv("POLYMARKET_API_KEY"),
         "POLY_TIMESTAMP": timestamp,
         "POLY_SIGNATURE": signature_b64,
@@ -159,55 +166,92 @@ def get_orderbook(token_id: str) -> dict | None:
 
 
 def place_limit_order(
+    private_key: str,
+    funder: str,
+    api_key: str,
     api_secret: str,
+    api_passphrase: str,
     token_id: str,
     side: str,
     size: float,
     price: float,
 ) -> dict | None:
     """
-    Envia ordem limit POST-ONLY.
+    Envia ordem limit POST-ONLY usando ordem assinada (formato CLOB).
 
-    POST-ONLY garante que a ordem so pode ser maker.
-    Se fosse executar imediatamente (taker), ela e cancelada.
+    A API exige body: { order, owner, orderType, postOnly } com order assinado.
+    Para signature_type=1 (magic email): L2 usa POLY_ADDRESS=funder (proxy).
     """
+    try:
+        from py_clob_client.client import ClobClient
+        from py_clob_client.clob_types import OrderArgs, OrderType, ApiCreds
+        from py_clob_client.order_builder.constants import BUY
+        from py_clob_client.utilities import order_to_json
+    except ImportError:
+        print("ERRO: py-clob-client nao instalado. Execute: pip install py-clob-client")
+        return None
+
+    if not private_key.startswith("0x"):
+        private_key = f"0x{private_key}"
+    funder_addr = funder.strip() if funder else ""
+    if funder_addr and not funder_addr.startswith("0x"):
+        funder_addr = f"0x{funder_addr}"
+
+    sig_type = int(os.getenv("POLYMARKET_SIGNATURE_TYPE", "1"))
+    client = ClobClient(
+        CLOB_HOST,
+        chain_id=137,
+        key=private_key,
+        signature_type=sig_type,
+        funder=funder_addr,
+    )
+    client.set_api_creds(ApiCreds(api_key=api_key, api_secret=api_secret, api_passphrase=api_passphrase))
+
+    # GTC: expiration deve ser 0 (servidor rejeita outro valor)
+    order_args = OrderArgs(price=price, size=size, side=BUY, token_id=token_id)
+    signed_order = client.create_order(order_args)
+    body_dict = order_to_json(signed_order, api_key, OrderType.GTC, post_only=True)
+    body = json.dumps(body_dict, separators=(",", ":"), ensure_ascii=False)
+
     path = "/order"
+    # Type 1 (magic email): tentar signer; se 400 invalid signature, tentar POLY_ADDRESS=funder
+    attempts = [("signer", None)]
+    if sig_type == 1 and funder_addr:
+        attempts.append(("funder", funder_addr))
+    for poly_addr_label, poly_addr in attempts:
+        headers = sign_request(api_secret, "POST", path, body, poly_address=poly_addr)
 
-    order_data = {
-        "tokenID": token_id,
-        "side": side,
-        "size": str(size),
-        "price": str(price),
-        "type": "GTC",  # Good Till Cancelled
-        "postOnly": True,  # IMPORTANTE: Apenas maker
-    }
+        print(f"\nEnviando ordem (POLY_ADDRESS={poly_addr_label}):")
+        print(f"  Token: {token_id[:20]}...")
+        print(f"  Side: {side}")
+        print(f"  Size: {size} shares")
+        print(f"  Price: ${price}")
+        print(f"  PostOnly: True (type 1)")
 
-    body = json.dumps(order_data)
-    headers = sign_request(api_secret, "POST", path, body)
-
-    print(f"\nEnviando ordem:")
-    print(f"  Token: {token_id[:20]}...")
-    print(f"  Side: {side}")
-    print(f"  Size: {size} shares")
-    print(f"  Price: ${price}")
-    print(f"  PostOnly: True")
-
-    with httpx.Client(timeout=30) as client:
-        response = client.post(
-            f"{CLOB_HOST}{path}",
-            headers=headers,
-            content=body,
-        )
-
+        with httpx.Client(timeout=30) as client_http:
+            response = client_http.post(
+                f"{CLOB_HOST}{path}",
+                headers=headers,
+                content=body,
+            )
         print(f"\nResposta: {response.status_code}")
-
         if response.status_code == 200:
             result = response.json()
             print(f"Ordem criada: {json.dumps(result, indent=2)}")
             return result
-        else:
-            print(f"Erro: {response.text}")
-            return None
+        err_text = response.text
+        if response.status_code == 400 and "invalid signature" in err_text.lower() and poly_addr_label == "signer" and funder_addr:
+            print("  (type 1: tentando com POLY_ADDRESS=funder...)")
+            continue
+        if response.status_code == 401 and poly_addr_label == "funder":
+            print("\n  Para type 1 (magic email), a API key deve estar associada ao funder.")
+            print("  Gere as keys de novo: echo 1 | python scripts/generate_api_keys.py")
+        if response.status_code == 400 and "invalid signature" in err_text.lower():
+            print("\n  Dica: confira POLYMARKET_PRIVATE_KEY e POLYMARKET_FUNDER (proxy).")
+            print("  Para type 1, keys geradas com generate_api_keys.py ficam no signer (EOA).")
+        print(f"Erro: {err_text}")
+        return None
+    return None
 
 
 def main():
@@ -222,6 +266,9 @@ def main():
 
     api_key = os.getenv("POLYMARKET_API_KEY")
     api_secret = os.getenv("POLYMARKET_API_SECRET")
+    api_passphrase = os.getenv("POLYMARKET_PASSPHRASE", "")
+    private_key = os.getenv("POLYMARKET_PRIVATE_KEY")
+    funder = os.getenv("POLYMARKET_FUNDER")
 
     if not api_key or not api_secret:
         print("ERRO: Credenciais nao encontradas no .env")
@@ -232,6 +279,9 @@ def main():
         print("E adicione ao .env:")
         print("  POLYMARKET_API_KEY=...")
         print("  POLYMARKET_API_SECRET=...")
+        sys.exit(1)
+    if not private_key or not funder:
+        print("ERRO: POLYMARKET_PRIVATE_KEY e POLYMARKET_FUNDER sao obrigatorios no .env (ordem assinada)")
         sys.exit(1)
 
     print(f"API Key: {api_key[:8]}...{api_key[-4:]}")
@@ -310,9 +360,13 @@ def main():
         print("Cancelado pelo usuario")
         sys.exit(0)
 
-    # 5. Enviar ordem
+    # 5. Enviar ordem (ordem assinada via py-clob-client)
     result = place_limit_order(
+        private_key=private_key,
+        funder=funder,
+        api_key=api_key,
         api_secret=api_secret,
+        api_passphrase=api_passphrase,
         token_id=token_id,
         side="BUY",
         size=MIN_SHARES,

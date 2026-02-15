@@ -2,22 +2,15 @@
 """
 Secure Claim Module - Main entry point.
 
-SECURITY:
-- Uses ONLY official libraries (web3.py, eth-account, httpx)
-- Direct blockchain calls, no third-party servers
-- Private key never transmitted anywhere
+Sempre LIVE: executa resgates de verdade na blockchain.
 
 USAGE:
-    # Dry run (see positions without redeeming)
-    python -m claim.main --dry-run
-
-    # Execute redeems
     python -m claim.main
+    python -m claim.main --loop   # scan a cada 5 min
 
 REQUIREMENTS:
-    - POL (MATIC) in wallet for gas
-    - POLYMARKET_PRIVATE_KEY in .env
-    - POLYMARKET_FUNDER in .env
+    - POL (MATIC) na wallet para gas
+    - POLYMARKET_PRIVATE_KEY e POLYMARKET_FUNDER no .env
 """
 import argparse
 import logging
@@ -28,54 +21,44 @@ from .config import ClaimConfig
 from .scanner import PositionScanner
 from .redeemer import SecureRedeemer
 
-# Setup logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
     datefmt="%H:%M:%S"
 )
 log = logging.getLogger(__name__)
+# Não mostrar log de HTTP do httpx (só dados atuais no nosso log)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Secure Polymarket Claim - Direct blockchain redemption"
-    )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Scan positions without executing redeems"
+        description="Secure Polymarket Claim - Resgate direto na blockchain (sempre LIVE)"
     )
     parser.add_argument(
         "--loop",
         action="store_true",
-        help="Run continuously (scan every 5 minutes)"
+        help="Rodar em loop (scan a cada 5 minutos)"
     )
     args = parser.parse_args()
 
-    # Banner
     print("=" * 60)
-    print(" SECURE CLAIM MODULE")
-    print(" Direct blockchain redemption using web3.py")
+    print(" SECURE CLAIM MODULE (LIVE)")
+    print(" Resgates executados na blockchain")
     print("=" * 60)
     print()
 
-    # Load config
-    config = ClaimConfig(dry_run=args.dry_run)
+    config = ClaimConfig()
 
-    # Validate
     errors = config.validate()
     if errors:
-        log.error("Configuration errors:")
+        log.error("Erros de configuração:")
         for e in errors:
             log.error(f"  - {e}")
         sys.exit(1)
 
-    if config.dry_run:
-        log.info("DRY-RUN MODE - No transactions will be executed")
-    else:
-        log.warning("LIVE MODE - Transactions will be executed!")
-
+    log.warning("LIVE MODE - Transações serão executadas!")
     print()
 
     # Initialize
@@ -101,31 +84,30 @@ def main():
 
 
 def run_once(scanner: PositionScanner, redeemer: SecureRedeemer, config: ClaimConfig):
-    """Run a single scan and redeem cycle."""
-    log.info("Scanning for redeemable positions...")
+    """Run a single scan and redeem cycle. Só mostra posições atuais ainda não resgatadas."""
     positions = scanner.scan()
 
     if not positions:
-        log.info("No redeemable positions found")
+        log.info("Nenhuma posição para resgatar no momento.")
         return
 
-    print()
-    log.info(f"Found {len(positions)} positions to redeem:")
-
     total_shares = sum(p.shares for p in positions)
-    log.info(f"Total: ~${total_shares:.2f} USDC")
-
+    log.info(f"Posições que a API indica para resgatar: {len(positions)} — ~${total_shares:.2f} USDC")
+    log.info("(Se a API estiver atrasada, posições já resgatadas serão ignoradas ao tentar.)")
+    for p in positions:
+        log.info(f"  • {p.market_slug}: {p.shares:.0f} shares ({p.outcome})")
     print()
 
     # Check POL balance
     pol_balance = redeemer.get_pol_balance()
-    if pol_balance < 0.01 and not config.dry_run:
+    if pol_balance < 0.01:
         log.error(f"Insufficient POL for gas! Balance: {pol_balance:.4f}")
         log.error(f"Send POL to: {redeemer.account.address}")
         return
 
     # Redeem each position
     success_count = 0
+    skipped_count = 0  # já resgatados (API desatualizada)
     fail_count = 0
 
     for pos in positions:
@@ -133,15 +115,19 @@ def run_once(scanner: PositionScanner, redeemer: SecureRedeemer, config: ClaimCo
 
         if result.success:
             success_count += 1
+        elif getattr(result, "error", "") == "already_redeemed":
+            skipped_count += 1
         else:
             fail_count += 1
 
-        # Small delay between transactions
-        if not config.dry_run:
-            time.sleep(2)
+        # Delay between transactions (evita rate limit do RPC)
+        time.sleep(12)
 
     print()
-    log.info(f"Completed: {success_count} success, {fail_count} failed")
+    if skipped_count:
+        log.info(f"Resumo: {success_count} resgatados, {skipped_count} já estavam resgatados (API atrasada), {fail_count} falhas")
+    else:
+        log.info(f"Resumo: {success_count} resgatados, {fail_count} falhas")
 
 
 def run_loop(scanner: PositionScanner, redeemer: SecureRedeemer, config: ClaimConfig):

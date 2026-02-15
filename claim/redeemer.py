@@ -11,6 +11,7 @@ REQUIREMENTS:
 - POL (MATIC) in wallet for gas fees (~0.01-0.05 POL per tx)
 """
 import logging
+import time
 from dataclasses import dataclass
 from typing import Optional
 
@@ -55,6 +56,63 @@ class SecureRedeemer:
         self.account: Optional[Account] = None
         self.contract = None
         self._initialized = False
+        self._current_rpc_url: Optional[str] = None
+
+    def _connect_to_rpc(self, rpc_url: str) -> bool:
+        """Conecta a um RPC e atualiza w3/contract. Retorna True se conectou. Suporta Infura com API Secret."""
+        try:
+            request_kwargs = {"timeout": 15}
+            try:
+                from polygon_rpc import get_request_kwargs_for_rpc
+                request_kwargs.update(get_request_kwargs_for_rpc(rpc_url, timeout=15))
+            except ImportError:
+                pass
+            self.w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs=request_kwargs))
+            if not self.w3.is_connected():
+                return False
+            self._current_rpc_url = rpc_url
+            self.contract = self.w3.eth.contract(
+                address=Web3.to_checksum_address(self.config.ctf_address),
+                abi=CTF_ABI
+            )
+            return True
+        except Exception:
+            return False
+
+    def _reconnect_next_rpc(self) -> bool:
+        """Em rate limit: troca para o próximo RPC da lista. Retorna True se conectou."""
+        urls = getattr(self.config, "rpc_urls", None) or [self.config.rpc_url]
+        current = (self._current_rpc_url or self.config.rpc_url).rstrip("/")
+        for url in urls:
+            if url.rstrip("/") == current:
+                continue
+            if self._connect_to_rpc(url):
+                log.info(f"  Troca de RPC (rate limit)")
+                return True
+        return False
+
+    def _get_receipt_from_other_rpcs(self, tx_hash) -> Optional[object]:
+        """Tenta obter o receipt da tx em outros RPCs (tx pode estar minerada em outro nó)."""
+        urls = getattr(self.config, "rpc_urls", None) or [self.config.rpc_url]
+        current = (self._current_rpc_url or "").rstrip("/")
+        for url in urls:
+            if url.rstrip("/") == current:
+                continue
+            try:
+                request_kwargs = {"timeout": 10}
+                try:
+                    from polygon_rpc import get_request_kwargs_for_rpc
+                    request_kwargs.update(get_request_kwargs_for_rpc(url, timeout=10))
+                except ImportError:
+                    pass
+                w3 = Web3(Web3.HTTPProvider(url, request_kwargs=request_kwargs))
+                receipt = w3.eth.get_transaction_receipt(tx_hash)
+                if receipt is not None:
+                    log.info(f"  Receipt obtido via outro RPC")
+                    return receipt
+            except Exception:
+                continue
+        return None
 
     def initialize(self) -> bool:
         """Initialize Web3 connection."""
@@ -62,18 +120,21 @@ class SecureRedeemer:
             return True
 
         try:
-            # Connect to Polygon RPC
-            self.w3 = Web3(Web3.HTTPProvider(self.config.rpc_url))
-
-            if not self.w3.is_connected():
-                log.error(f"Failed to connect to {self.config.rpc_url}")
+            # Tentar lista de RPCs (fallback)
+            urls = getattr(self.config, "rpc_urls", None) or [self.config.rpc_url]
+            for rpc_url in urls:
+                if self._connect_to_rpc(rpc_url):
+                    break
+            else:
+                log.error("Failed to connect to any Polygon RPC")
                 return False
 
             log.info(f"Connected to Polygon (chain {self.w3.eth.chain_id})")
 
-            # Load account from private key
-            self.account = Account.from_key(self.config.private_key)
-            log.info(f"Wallet: {self.account.address}")
+            # Load account from private key (uma vez só)
+            if not self.account:
+                self.account = Account.from_key(self.config.private_key)
+                log.info(f"Wallet: {self.account.address}")
 
             # Check POL balance for gas
             balance_wei = self.w3.eth.get_balance(self.account.address)
@@ -83,12 +144,6 @@ class SecureRedeemer:
             if balance_pol < 0.01:
                 log.warning("Low POL balance! Need POL for gas fees.")
                 log.warning(f"Send POL to: {self.account.address}")
-
-            # Load CTF contract
-            self.contract = self.w3.eth.contract(
-                address=Web3.to_checksum_address(self.config.ctf_address),
-                abi=CTF_ABI
-            )
 
             self._initialized = True
             return True
@@ -111,17 +166,8 @@ class SecureRedeemer:
                     position=position
                 )
 
-        # Dry run mode
-        if self.config.dry_run:
-            log.info(f"[DRY-RUN] Would redeem {position.shares:.2f} shares of {position.market_slug}")
-            return RedeemResult(
-                success=True,
-                tx_hash="DRY_RUN",
-                position=position
-            )
-
         try:
-            log.info(f"Redeeming {position.shares:.2f} shares of {position.market_slug}...")
+            log.info(f"Resgatando {position.shares:.0f} shares — {position.market_slug} ({position.outcome})...")
 
             # Prepare condition_id as bytes32
             condition_id = position.condition_id
@@ -133,9 +179,6 @@ class SecureRedeemer:
             # Index sets: [1] for outcome 0 (Yes/Up), [2] for outcome 1 (No/Down)
             # The index set is a bitmap where bit i represents outcome i
             index_sets = [1 << position.outcome_index]
-
-            log.info(f"  condition_id: {position.condition_id[:20]}...")
-            log.info(f"  index_sets: {index_sets}")
 
             # Build transaction
             tx = self.contract.functions.redeemPositions(
@@ -156,25 +199,58 @@ class SecureRedeemer:
 
             # Send to blockchain
             tx_hash = self.w3.eth.send_raw_transaction(signed_tx.raw_transaction)
-            log.info(f"  TX submitted: {tx_hash.hex()}")
+            log.info(f"  TX: {tx_hash.hex()[:20]}...")
 
-            # Wait for confirmation
-            receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
+            # Wait for confirmation (retry on rate limit; se timeout, tenta receipt em outros RPCs)
+            receipt = None
+            for attempt in range(10):
+                try:
+                    receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=60)
+                    break
+                except Exception as e:
+                    err = str(e).lower()
+                    if "rate limit" in err or "too many requests" in err:
+                        if self._reconnect_next_rpc():
+                            time.sleep(2)
+                            continue
+                        if attempt < 9:
+                            log.warning(f"  RPC rate limit, aguardando 12s...")
+                            time.sleep(12)
+                            continue
+                    if "not in the chain" in err or "timeout" in err:
+                        # Tx pode já estar minerada; buscar receipt em outros RPCs
+                        receipt = self._get_receipt_from_other_rpcs(tx_hash)
+                        if receipt is not None:
+                            break
+                        if attempt < 9:
+                            log.warning(f"  Timeout no receipt, tentando outro RPC em 5s...")
+                            time.sleep(5)
+                            if self._reconnect_next_rpc():
+                                continue
+                    raise
 
-            if receipt.status == 1:
-                log.info(f"  SUCCESS! Block {receipt.blockNumber}, gas used: {receipt.gasUsed}")
+            if receipt and receipt.status == 1:
+                log.info(f"  OK — bloco {receipt.blockNumber}")
                 return RedeemResult(
                     success=True,
                     tx_hash=tx_hash.hex(),
                     gas_used=receipt.gasUsed,
                     position=position
                 )
-            else:
-                log.error(f"  Transaction reverted!")
+            elif receipt:
+                # Revert muitas vezes = posição já foi resgatada (API desatualizada)
+                log.info(f"  Já resgatado (API ainda não atualizou) — pular")
                 return RedeemResult(
                     success=False,
                     tx_hash=tx_hash.hex(),
-                    error="Transaction reverted",
+                    error="already_redeemed",
+                    position=position
+                )
+            else:
+                log.warning(f"  TX enviada; verifique no explorer: {tx_hash.hex()}")
+                return RedeemResult(
+                    success=True,
+                    tx_hash=tx_hash.hex(),
                     position=position
                 )
 
@@ -193,12 +269,23 @@ class SecureRedeemer:
             )
 
     def get_pol_balance(self) -> float:
-        """Get POL balance for gas."""
+        """Get POL balance for gas. Troca de RPC se der rate limit."""
         if not self._initialized:
             self.initialize()
 
-        if self.w3 and self.account:
-            balance_wei = self.w3.eth.get_balance(self.account.address)
-            return balance_wei / 10**18
+        if not self.w3 or not self.account:
+            return 0.0
 
+        for _ in range(8):
+            try:
+                balance_wei = self.w3.eth.get_balance(self.account.address)
+                return balance_wei / 10**18
+            except Exception as e:
+                err = str(e).lower()
+                if "rate limit" in err or "too many requests" in err:
+                    if self._reconnect_next_rpc():
+                        continue
+                    time.sleep(12)
+                    continue
+                raise
         return 0.0

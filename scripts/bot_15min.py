@@ -5,7 +5,7 @@ Bot 24/7 para mercados 15min do Polymarket (BTC, ETH, SOL, XRP).
 Estratégia:
 - Detecta ciclos de 15min automaticamente
 - Entra quando YES ou NO estiver entre 95%-98%
-- Janela de entrada: 4min a 1min antes da expiração
+- Janela de entrada: 5min a 1min antes da expiração
 - Timeout de fill: 10s
 - Máximo 1 trade por ciclo por mercado
 
@@ -47,12 +47,15 @@ CHAIN_ID = 137
 
 # Configurações do bot
 POLL_SECONDS = 1           # Intervalo do loop principal
-ENTRY_WINDOW_START = 240   # Segundos antes da expiração (4min)
+ENTRY_WINDOW_START = 300   # Segundos antes da expiração (5min)
 ENTRY_WINDOW_END = 60      # Hard stop (1min)
 FILL_TIMEOUT = 10          # Segundos para aguardar fill
 MIN_SHARES = 5             # Quantidade por ordem
 MIN_PRICE = 0.95           # Preço mínimo para entrada
 MAX_PRICE = 0.98           # Preço máximo para entrada
+MIN_BALANCE_USDC = 5.5     # Saldo mínimo (USDC) para enviar ordem
+ORDER_FAIL_RETRY_DELAY = 2 # Segundos antes de reenviar após falha
+ORDER_FAIL_MAX_RETRIES = 2 # Tentativas de place_order antes de desistir
 
 # Mercados
 ASSETS = ['btc', 'eth', 'sol', 'xrp']
@@ -241,8 +244,13 @@ def _fetch_market_by_slug(http, asset: str, slug: str) -> Optional[dict]:
             # Fallback: assumir fim da janela
             end_ts = int(slug.split("-")[-1]) + 900
 
-        # Preços via Gamma API (outcomePrices)
-        yes_price, no_price = get_outcome_prices(market)
+        # Preços ao vivo do CLOB (midpoint ou book) — só dados reais; sem default 0.50
+        yes_price = get_best_price(yes_token)
+        no_price = get_best_price(no_token)
+        if yes_price is None or no_price is None:
+            return None  # skip mercado sem preço real (evita dados fake)
+        yes_price = float(yes_price)
+        no_price = float(no_price)
 
         return {
             "asset": asset,
@@ -259,22 +267,64 @@ def _fetch_market_by_slug(http, asset: str, slug: str) -> Optional[dict]:
         return None
 
 
-def get_best_price(token_id: str) -> float:
-    """Busca melhor preço (best ask) para um token."""
+def _float_price(v) -> Optional[float]:
+    if v is None:
+        return None
+    try:
+        p = float(v)
+        return p if 0 <= p <= 1 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def get_best_price(token_id: str) -> Optional[float]:
+    """Preço real ao vivo: CLOB /midpoint (oficial) ou mid do book (bid+ask)/2. Sem Gamma. None = sem dado real."""
+    http = get_http()
+    base = CLOB_HOST.rstrip("/")
+    # 1) Endpoint oficial Polymarket — midpoint
+    try:
+        r = http.get(f"{base}/midpoint", params={"token_id": token_id})
+        if r.status_code == 200:
+            data = r.json()
+            mid = data.get("mid") or data.get("price")
+            p = _float_price(mid)
+            if p is not None:
+                return p
+    except Exception:
+        pass
+    # 2) Fallback: mid do orderbook (best_bid + best_ask) / 2
+    try:
+        r = http.get(f"{base}/book", params={"token_id": token_id})
+        if r.status_code == 200:
+            book = r.json()
+            bids = book.get("bids", [])
+            asks = book.get("asks", [])
+            best_bid = _float_price(bids[0].get("price") or bids[0].get("p")) if bids else None
+            best_ask = _float_price(asks[0].get("price") or asks[0].get("p")) if asks else None
+            if best_bid is not None and best_ask is not None:
+                return round((best_bid + best_ask) / 2, 2)
+            if best_ask is not None:
+                return best_ask
+            if best_bid is not None:
+                return best_bid
+    except Exception:
+        pass
+    return None  # sem preço real — caller não deve usar 0.50
+
+
+def get_best_ask(token_id: str) -> Optional[float]:
+    """Best ask do book CLOB (para colocar ordem 1 tick abaixo)."""
     try:
         http = get_http()
-        r = http.get(f"{CLOB_HOST}/book", params={"token_id": token_id})
+        r = http.get(f"{CLOB_HOST.rstrip('/')}/book", params={"token_id": token_id})
         if r.status_code == 200:
             book = r.json()
             asks = book.get("asks", [])
             if asks:
-                return float(asks[0].get("price", 0.50))
-            bids = book.get("bids", [])
-            if bids:
-                return float(bids[0].get("price", 0.50))
+                return _float_price(asks[0].get("price") or asks[0].get("p"))
     except Exception:
         pass
-    return 0.50  # Default mid-price
+    return None
 
 
 def get_outcome_prices(market: dict) -> tuple:
@@ -287,6 +337,75 @@ def get_outcome_prices(market: dict) -> tuple:
         if len(outcome_prices) >= 2:
             return float(outcome_prices[0]), float(outcome_prices[1])
     return 0.50, 0.50
+
+
+# ==============================================================================
+# SALDO USDC (opcional: requer web3)
+# ==============================================================================
+
+def _get_balance_wallet_address() -> Optional[str]:
+    """Endereço onde está o USDC (funder/proxy ou EOA)."""
+    funder = os.getenv("POLYMARKET_FUNDER", "").strip()
+    if funder:
+        return funder if funder.startswith("0x") else f"0x{funder}"
+    try:
+        from eth_account import Account
+        pk = os.getenv("POLYMARKET_PRIVATE_KEY", "")
+        if not pk.startswith("0x"):
+            pk = f"0x{pk}"
+        if pk:
+            return Account.from_key(pk).address
+    except Exception:
+        pass
+    return None
+
+
+def get_usdc_balance() -> Optional[float]:
+    """Saldo USDC on-chain (Polygon). Tenta vários RPCs em caso de falha/rate limit."""
+    try:
+        from web3 import Web3
+    except ImportError:
+        return None
+    wallet = _get_balance_wallet_address()
+    if not wallet:
+        return None
+    try:
+        from polygon_rpc import get_web3_with_fallback, get_polygon_rpc_list
+    except ImportError:
+        get_web3_with_fallback = None
+        get_polygon_rpc_list = lambda: [os.getenv("POLYGON_RPC", "https://polygon-rpc.com")]
+    usdc_address = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+    abi = [{"constant": True, "inputs": [{"name": "account", "type": "address"}], "name": "balanceOf", "outputs": [{"name": "", "type": "uint256"}], "type": "function"}]
+    urls = get_polygon_rpc_list()
+    if get_web3_with_fallback:
+        w3 = get_web3_with_fallback(timeout=5)
+        if w3:
+            try:
+                usdc = w3.eth.contract(address=Web3.to_checksum_address(usdc_address), abi=abi)
+                raw = usdc.functions.balanceOf(Web3.to_checksum_address(wallet)).call()
+                return raw / 10**6
+            except Exception:
+                pass
+    for rpc in urls:
+        try:
+            w3 = Web3(Web3.HTTPProvider(rpc, request_kwargs={"timeout": 5}))
+            usdc = w3.eth.contract(address=Web3.to_checksum_address(usdc_address), abi=abi)
+            raw = usdc.functions.balanceOf(Web3.to_checksum_address(wallet)).call()
+            return raw / 10**6
+        except Exception:
+            continue
+    return None
+
+
+def place_order_with_retry(token_id: str, price: float, size: float) -> Optional[str]:
+    """Envia ordem com retry em caso de falha (até ORDER_FAIL_MAX_RETRIES)."""
+    for attempt in range(ORDER_FAIL_MAX_RETRIES):
+        order_id = place_order(token_id, price, size)
+        if order_id:
+            return order_id
+        if attempt < ORDER_FAIL_MAX_RETRIES - 1:
+            time.sleep(ORDER_FAIL_RETRY_DELAY)
+    return None
 
 
 # ==============================================================================
@@ -465,11 +584,11 @@ def main():
             if time_to_expiry > ENTRY_WINDOW_START:
                 continue
 
-            # 6. Já em posição ou já tentou?
+            # 6. Já em posição (FILLED) ou ciclo encerrado? Só 1 fill por mercado por ciclo.
             if ctx.state in (MarketState.HOLDING, MarketState.DONE, MarketState.SKIPPED):
                 continue
             if ctx.trade_attempts >= 1:
-                continue
+                continue  # já executou uma ordem neste ciclo — não reenvia
 
             # 7. Verificar condição 95%-98%
             side, token_id, price = None, None, None
@@ -484,20 +603,28 @@ def main():
                 price = max(0.01, round(no_price - 0.01, 2))
 
             if not side:
+                # Na janela mas preço fora do range 95%-98% — log para diagnóstico
+                log_event("SKIP_PRICE_OOR", asset, ctx, yes_price=round(yes_price, 2), no_price=round(no_price, 2), time_to_expiry=time_to_expiry)
                 continue
 
-            # 8. Enviar ordem
+            # 7b. Verificar saldo USDC antes de enviar ordem
+            balance = get_usdc_balance()
+            if balance is not None and balance < MIN_BALANCE_USDC:
+                log_event("SKIP_INSUFFICIENT_BALANCE", asset, ctx, balance=round(balance, 2), required=MIN_BALANCE_USDC)
+                continue
+
+            # 8. Enviar ordem (com retry se falhar)
             log_event("PLACING_ORDER", asset, ctx, side=side, price=price, size=MIN_SHARES, time_to_expiry=time_to_expiry)
 
-            order_id = place_order(token_id, price, MIN_SHARES)
+            order_id = place_order_with_retry(token_id, price, MIN_SHARES)
             if not order_id:
                 ctx.state = MarketState.SKIPPED
                 log_event("ORDER_FAILED", asset, ctx)
                 continue
 
             ctx.state = MarketState.ORDER_PLACED
-            ctx.trade_attempts += 1
             ctx.order_id = order_id
+            # trade_attempts só sobe quando FILLED — assim pode reenviar após timeout
 
             log_event("ORDER_PLACED", asset, ctx, side=side, price=price, order_id=order_id)
 
@@ -505,16 +632,51 @@ def main():
             filled = wait_for_fill(order_id, timeout=FILL_TIMEOUT)
 
             if filled:
+                ctx.trade_attempts += 1  # 1 fill por mercado por ciclo
                 ctx.state = MarketState.HOLDING
                 ctx.entered_side = side
                 ctx.entered_price = price
                 ctx.entered_size = MIN_SHARES
                 ctx.entered_ts = now
+                ctx.order_id = None
                 log_event("FILLED", asset, ctx, side=side, price=price)
             else:
                 cancel_order(order_id)
-                ctx.state = MarketState.SKIPPED
+                ctx.order_id = None
                 log_event("TIMEOUT_CANCEL", asset, ctx, side=side, price=price)
+                # Reenviar 1 tick abaixo do best ask, respeitando teto 95%-98%
+                best_ask = get_best_ask(token_id)
+                if best_ask is not None:
+                    retry_price = max(0.01, min(MAX_PRICE, round(best_ask - 0.01, 2)))
+                    if retry_price < MIN_PRICE:
+                        ctx.state = MarketState.IDLE
+                        continue
+                    log_event("PLACING_ORDER", asset, ctx, side=side, price=retry_price, size=MIN_SHARES, time_to_expiry=time_to_expiry, retry=True)
+                    order_id = place_order_with_retry(token_id, retry_price, MIN_SHARES)
+                    if order_id:
+                        ctx.state = MarketState.ORDER_PLACED
+                        ctx.order_id = order_id
+                        log_event("ORDER_PLACED", asset, ctx, side=side, price=retry_price, order_id=order_id)
+                        filled = wait_for_fill(order_id, timeout=FILL_TIMEOUT)
+                        if filled:
+                            ctx.trade_attempts += 1
+                            ctx.state = MarketState.HOLDING
+                            ctx.entered_side = side
+                            ctx.entered_price = retry_price
+                            ctx.entered_size = MIN_SHARES
+                            ctx.entered_ts = now
+                            ctx.order_id = None
+                            log_event("FILLED", asset, ctx, side=side, price=retry_price)
+                        else:
+                            cancel_order(order_id)
+                            ctx.state = MarketState.IDLE
+                            ctx.order_id = None
+                            log_event("TIMEOUT_CANCEL", asset, ctx, side=side, price=retry_price)
+                    else:
+                        ctx.state = MarketState.IDLE
+                        log_event("ORDER_FAILED", asset, ctx)
+                else:
+                    ctx.state = MarketState.IDLE
 
         # Aguardar próximo ciclo
         time.sleep(POLL_SECONDS)

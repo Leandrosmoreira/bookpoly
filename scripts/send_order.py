@@ -2,6 +2,7 @@
 """
 Envia ordens limit POST-ONLY usando signature_type=1 (Magic/Proxy).
 Suporta múltiplos mercados 15min simultaneamente.
+No teste: cada ordem é cancelada após 10s (CANCEL_AFTER_SECONDS).
 
 USO:
     python scripts/send_order.py
@@ -66,6 +67,9 @@ def get_best_bid(token_id: str) -> float:
     return 0.01
 
 
+CANCEL_AFTER_SECONDS = 10  # No teste: cancelar ordem após N segundos
+
+
 def send_single_order(client, asset: str, token_id: str, price: float):
     """Envia uma ordem para um mercado específico."""
     try:
@@ -77,10 +81,22 @@ def send_single_order(client, asset: str, token_id: str, price: float):
         return (asset.upper(), "ERRO", str(e))
 
 
+def cancel_order(client, order_id: str) -> bool:
+    """Cancela uma ordem pelo ID."""
+    try:
+        resp = client.cancel(order_id)
+        return resp.get("canceled", False) or resp.get("success", False)
+    except Exception as e:
+        print(f"  [ERRO] cancel: {e}")
+        return False
+
+
 def main():
     print("=" * 60)
     print("ORDENS LIMIT - TYPE 1 (Magic/Proxy)")
     print(f"MERCADOS: {', '.join(a.upper() for a in ASSETS)}")
+    if CANCEL_AFTER_SECONDS > 0:
+        print(f"TESTE: ordens canceladas apos {CANCEL_AFTER_SECONDS}s")
     print("=" * 60)
 
     pk = os.getenv("POLYMARKET_PRIVATE_KEY", "")
@@ -167,6 +183,14 @@ def main():
             print(f"Status: SUCCESS")
             print(json.dumps(info, indent=2))
             success_count += 1
+            order_id = info.get("orderID") or info.get("order_id")
+            if order_id and CANCEL_AFTER_SECONDS > 0:
+                print(f"Aguardando {CANCEL_AFTER_SECONDS}s para cancelar...")
+                time.sleep(CANCEL_AFTER_SECONDS)
+                if cancel_order(client, order_id):
+                    print(f"Ordem cancelada (orderID={order_id}).")
+                else:
+                    print(f"Falha ao cancelar ordem {order_id}.")
         else:
             print(f"Status: ERRO")
             print(f"  {info}")
