@@ -16,8 +16,13 @@ class Config:
     window: str = os.getenv("WINDOW", "15m")
     out_dir: str = os.getenv("OUT_DIR", "data/raw/books")
     coins: list = field(default_factory=list)
+    # Moedas para gravar também no mercado 5min (ex.: COINS_5M=btc)
+    coins_5m: list = field(default_factory=list)
 
     def __post_init__(self):
         if not self.coins:
             raw = os.getenv("COINS", "btc,eth,sol,xrp")
             self.coins = [c.strip().lower() for c in raw.split(",")]
+        if not self.coins_5m:
+            raw_5m = os.getenv("COINS_5M", "btc")
+            self.coins_5m = [c.strip().lower() for c in raw_5m.split(",")] if raw_5m else []

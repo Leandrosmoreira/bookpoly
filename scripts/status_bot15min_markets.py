@@ -22,7 +22,7 @@ load_dotenv(Path(__file__).parent.parent / ".env")
 GAMMA_HOST = os.getenv("GAMMA_BASE_URL", "https://gamma-api.polymarket.com")
 CLOB_HOST = os.getenv("CLOB_BASE_URL", "https://clob.polymarket.com")
 ASSETS = ["btc", "eth", "sol", "xrp"]
-ENTRY_WINDOW_START = 300  # 5 min antes
+ENTRY_WINDOW_START = 240  # 4 min antes
 ENTRY_WINDOW_END = 60     # 1 min antes
 
 
@@ -109,7 +109,7 @@ def status_label(ttl: int) -> str:
         return "FECHANDO (<1min)"
     if ttl <= ENTRY_WINDOW_START:
         return "JANELA ENTRADA (operando)"
-    return "AGUARDANDO (>5min)"
+    return "AGUARDANDO (>4min)"
 
 
 def main():

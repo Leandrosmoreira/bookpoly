@@ -23,7 +23,7 @@ LOG_DIR = Path(__file__).parent.parent / "logs"
 GAMMA_HOST = os.getenv("GAMMA_BASE_URL", "https://gamma-api.polymarket.com")
 CLOB_HOST = os.getenv("CLOB_BASE_URL", "https://clob.polymarket.com")
 ASSETS = ["btc", "eth", "sol", "xrp"]
-ENTRY_WINDOW_START = 300   # 5 min antes da expiração
+ENTRY_WINDOW_START = 240   # 4 min antes da expiração
 ENTRY_WINDOW_END = 60      # 1 min antes (hard stop)
 
 # ─── Cores ANSI ──────────────────────────────────────────────────────────────
@@ -265,7 +265,7 @@ def progress_bar(elapsed: int, total: int, width: int = 30) -> str:
     # Cor baseada no progresso
     if pct >= 0.93:  # Últimos segundos
         color = C.RED + C.BOLD
-    elif pct >= 0.80:  # Janela de entrada (5min-1min)
+    elif pct >= 0.80:  # Janela de entrada (4min-1min)
         color = C.YELLOW
     elif pct >= 0.67:  # Perto da janela
         color = C.CYAN
@@ -402,7 +402,7 @@ def build_dashboard(events: list[dict], live_data: tuple | None = None) -> str:
     # Barra de progresso
     bar = progress_bar(elapsed, 900, width=40)
     if in_entry_window:
-        entry_tag = f"  {C.BG_YELLOW}{C.BOLD} JANELA DE ENTRADA (5min→1min) {C.RESET}"
+        entry_tag = f"  {C.BG_YELLOW}{C.BOLD} JANELA DE ENTRADA (4min→1min) {C.RESET}"
     elif time_to_expiry < ENTRY_WINDOW_END:
         entry_tag = f"  {C.BG_RED}{C.BOLD} HARD STOP (<1min) {C.RESET}"
     elif time_to_expiry > ENTRY_WINDOW_START:

@@ -15,6 +15,8 @@ from market_discovery import MarketDiscovery, current_window_ts
 from recorder import build_row, build_error_row
 from writer import Writer
 
+INTERVALS = ("15m", "5m")  # intervals we record (5m only if COINS_5M set)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)-5s %(name)s | %(message)s",
@@ -33,7 +35,8 @@ def _signal_handler():
 
 async def run():
     config = Config()
-    log.info(f"Config: coins={config.coins}, depth={config.depth_levels}, hz={config.poll_hz}")
+    coins_5m = getattr(config, "coins_5m", []) or []
+    log.info(f"Config: coins={config.coins}, coins_5m={coins_5m}, depth={config.depth_levels}, hz={config.poll_hz}")
 
     writer = Writer(config.out_dir)
     client = ClobClient(config)
@@ -55,20 +58,23 @@ async def run():
         log.info(f"Discovered {len(markets)} markets: {list(markets.keys())}")
 
         seq = 0
-        last_window = current_window_ts(server_time)
+        last_windows = {interval: current_window_ts(server_time, interval) for interval in INTERVALS}
 
         while not shutdown_event.is_set():
             t0 = time.monotonic()
             ts_system = time.time()
             server_time = ts_system + server_offset
 
-            # 3. Rediscover on window transition
-            cur_window = current_window_ts(server_time)
-            if cur_window != last_window:
-                log.info(f"Window transition: {last_window} -> {cur_window}")
-                last_window = cur_window
-                # Clear cache to force rediscovery
-                discovery._cache.clear()
+            # 3. Rediscover on window transition (per interval: 15m or 5m)
+            rediscover = False
+            for interval in INTERVALS:
+                cur_window = current_window_ts(server_time, interval)
+                if cur_window != last_windows.get(interval):
+                    log.info(f"Window transition ({interval}): {last_windows.get(interval)} -> {cur_window}")
+                    last_windows[interval] = cur_window
+                    discovery.clear_cache_for_interval(interval)
+                    rediscover = True
+            if rediscover:
                 new_markets = await discovery.discover_all(session, server_time)
                 if new_markets:
                     markets = new_markets
@@ -87,22 +93,22 @@ async def run():
                 latency_ms = (time.monotonic() - t0) * 1000
             except Exception as e:
                 log.error(f"Batch fetch failed: {e}")
-                for coin, info in markets.items():
-                    row = build_error_row(coin, info, seq, ts_system, str(e))
+                for label, info in markets.items():
+                    row = build_error_row(label, info, seq, ts_system, str(e))
                     writer.write(info["market_label"], row)
                 seq += 1
                 await _sleep_until_next(t0, config.poll_hz)
                 continue
 
             # 6. Build and write rows
-            for coin, info in markets.items():
+            for label, info in markets.items():
                 yes_book = books.get(info["yes_token"])
                 no_book = books.get(info["no_token"])
 
                 if yes_book is None and no_book is None:
-                    row = build_error_row(coin, info, seq, ts_system, "both_books_empty")
+                    row = build_error_row(label, info, seq, ts_system, "both_books_empty")
                 else:
-                    row = build_row(coin, info, yes_book, no_book, seq, ts_system, latency_ms)
+                    row = build_row(label, info, yes_book, no_book, seq, ts_system, latency_ms)
 
                 writer.write(info["market_label"], row)
 

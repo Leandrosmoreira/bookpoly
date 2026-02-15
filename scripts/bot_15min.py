@@ -5,7 +5,7 @@ Bot 24/7 para mercados 15min do Polymarket (BTC, ETH, SOL, XRP).
 Estratégia:
 - Detecta ciclos de 15min automaticamente
 - Entra quando YES ou NO estiver entre 95%-98%
-- Janela de entrada: 5min a 1min antes da expiração
+- Janela de entrada: 4min a 1min antes da expiração
 - Timeout de fill: 10s
 - Máximo 1 trade por ciclo por mercado
 
@@ -47,13 +47,13 @@ CHAIN_ID = 137
 
 # Configurações do bot
 POLL_SECONDS = 1           # Intervalo do loop principal
-ENTRY_WINDOW_START = 300   # Segundos antes da expiração (5min)
+ENTRY_WINDOW_START = 240   # Segundos antes da expiração (4min)
 ENTRY_WINDOW_END = 60      # Hard stop (1min)
 FILL_TIMEOUT = 10          # Segundos para aguardar fill
-MIN_SHARES = 5             # Quantidade por ordem
+MIN_SHARES = 6             # Quantidade por ordem
 MIN_PRICE = 0.93           # Preço mínimo para entrada
 MAX_PRICE = 0.98           # Preço máximo para entrada
-MIN_BALANCE_USDC = 5.5     # Saldo mínimo (USDC) para enviar ordem
+MIN_BALANCE_USDC = 6.5     # Saldo mínimo (USDC) para 6 shares @ 98%
 ORDER_FAIL_RETRY_DELAY = 2 # Segundos antes de reenviar após falha
 ORDER_FAIL_MAX_RETRIES = 2 # Tentativas de place_order antes de desistir
 
@@ -89,6 +89,7 @@ class MarketContext:
     entered_ts: Optional[int] = None
     yes_token_id: Optional[str] = None
     no_token_id: Optional[str] = None
+    skip_retried: bool = False  # True após dar uma nova chance após SKIPPED no mesmo ciclo
 
 
 # ==============================================================================
@@ -492,6 +493,7 @@ def reset_context(ctx: MarketContext):
     ctx.entered_price = None
     ctx.entered_size = None
     ctx.entered_ts = None
+    ctx.skip_retried = False
 
 
 # ==============================================================================
@@ -600,11 +602,19 @@ def main():
             if time_to_expiry > ENTRY_WINDOW_START:
                 continue
 
-            # 6. Já em posição (FILLED) ou ciclo encerrado? Só 1 fill por mercado por ciclo.
+            # 5b. SKIPPED mas ainda na janela (4min–1min) e preço no range 93%–98%? Uma nova chance no mesmo ciclo.
+            if ctx.state == MarketState.SKIPPED and not ctx.skip_retried:
+                if (MIN_PRICE <= yes_price <= MAX_PRICE) or (MIN_PRICE <= no_price <= MAX_PRICE):
+                    ctx.state = MarketState.IDLE
+                    ctx.trade_attempts = 0
+                    ctx.skip_retried = True
+                    log_event("RE_ENTRY_AFTER_SKIP", asset, ctx, time_to_expiry=time_to_expiry, yes_price=round(yes_price, 2), no_price=round(no_price, 2))
+
+            # 6. Já em posição (FILLED) ou ciclo encerrado?
             if ctx.state in (MarketState.HOLDING, MarketState.DONE, MarketState.SKIPPED):
                 continue
             if ctx.trade_attempts >= 1:
-                continue  # já executou uma ordem neste ciclo — não reenvia
+                continue  # já deu fill neste ciclo — não reenvia
 
             # 7. Verificar condição 95%-98%
             side, token_id, price = None, None, None

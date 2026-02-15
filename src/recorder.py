@@ -122,7 +122,7 @@ def build_error_row(
         timespec="milliseconds"
     )
 
-    label = market_info["market_label"] if market_info else f"{coin.upper()}15m"
+    label = market_info["market_label"] if market_info else coin
     cid = market_info["condition_id"] if market_info else ""
     wts = market_info["window_ts"] if market_info else 0
 
