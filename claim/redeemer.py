@@ -152,6 +152,29 @@ class SecureRedeemer:
             log.error(f"Failed to initialize: {e}")
             return False
 
+    def _has_position_balance(self, token_id: str) -> bool:
+        """Verifica on-chain se o wallet ainda tem tokens desta posição.
+
+        Evita enviar tx de redeem para posições já resgatadas (API pode estar atrasada).
+        """
+        for _ in range(4):
+            try:
+                balance = self.contract.functions.balanceOf(
+                    Web3.to_checksum_address(self.config.wallet_address),
+                    int(token_id)
+                ).call()
+                return balance > 0
+            except Exception as e:
+                err = str(e).lower()
+                if "rate limit" in err or "too many requests" in err:
+                    if self._reconnect_next_rpc():
+                        continue
+                    time.sleep(5)
+                    continue
+                log.warning(f"  Erro ao verificar balance on-chain: {e}")
+                return True  # Em dúvida, tenta resgatar
+        return True
+
     def redeem(self, position: RedeemablePosition) -> RedeemResult:
         """
         Redeem a winning position.
@@ -167,6 +190,15 @@ class SecureRedeemer:
                 )
 
         try:
+            # Verificar on-chain se ainda tem saldo (evita revert em posições já resgatadas)
+            if not self._has_position_balance(position.token_id):
+                log.info(f"  Já resgatado (saldo on-chain = 0) — pular: {position.market_slug}")
+                return RedeemResult(
+                    success=False,
+                    error="already_redeemed",
+                    position=position
+                )
+
             log.info(f"Resgatando {position.shares:.0f} shares — {position.market_slug} ({position.outcome})...")
 
             # Prepare condition_id as bytes32

@@ -98,6 +98,9 @@ class MarketContext:
 _client: Optional[ClobClient] = None
 _http: Optional[httpx.Client] = None
 _running = True
+_usdc_balance_cache: Optional[float] = None
+_usdc_balance_cache_ts: float = 0
+BALANCE_CACHE_TTL = 60  # Cache saldo por 60 segundos
 
 
 def get_client() -> ClobClient:
@@ -361,7 +364,20 @@ def _get_balance_wallet_address() -> Optional[str]:
 
 
 def get_usdc_balance() -> Optional[float]:
-    """Saldo USDC on-chain (Polygon). Tenta vários RPCs em caso de falha/rate limit."""
+    """Saldo USDC on-chain (Polygon). Cacheado por 60s. Tenta vários RPCs em caso de falha/rate limit."""
+    global _usdc_balance_cache, _usdc_balance_cache_ts
+    now = time.time()
+    if _usdc_balance_cache is not None and (now - _usdc_balance_cache_ts) < BALANCE_CACHE_TTL:
+        return _usdc_balance_cache
+    result = _fetch_usdc_balance()
+    if result is not None:
+        _usdc_balance_cache = result
+        _usdc_balance_cache_ts = now
+    return result
+
+
+def _fetch_usdc_balance() -> Optional[float]:
+    """Busca saldo USDC on-chain (sem cache)."""
     try:
         from web3 import Web3
     except ImportError:
@@ -649,7 +665,8 @@ def main():
                 if best_ask is not None:
                     retry_price = max(0.01, min(MAX_PRICE, round(best_ask - 0.01, 2)))
                     if retry_price < MIN_PRICE:
-                        ctx.state = MarketState.IDLE
+                        ctx.trade_attempts += 1
+                        ctx.state = MarketState.SKIPPED
                         continue
                     log_event("PLACING_ORDER", asset, ctx, side=side, price=retry_price, size=MIN_SHARES, time_to_expiry=time_to_expiry, retry=True)
                     order_id = place_order_with_retry(token_id, retry_price, MIN_SHARES)
@@ -669,14 +686,17 @@ def main():
                             log_event("FILLED", asset, ctx, side=side, price=retry_price)
                         else:
                             cancel_order(order_id)
-                            ctx.state = MarketState.IDLE
+                            ctx.trade_attempts += 1
+                            ctx.state = MarketState.SKIPPED
                             ctx.order_id = None
                             log_event("TIMEOUT_CANCEL", asset, ctx, side=side, price=retry_price)
                     else:
-                        ctx.state = MarketState.IDLE
+                        ctx.trade_attempts += 1
+                        ctx.state = MarketState.SKIPPED
                         log_event("ORDER_FAILED", asset, ctx)
                 else:
-                    ctx.state = MarketState.IDLE
+                    ctx.trade_attempts += 1
+                    ctx.state = MarketState.SKIPPED
 
         # Aguardar próximo ciclo
         time.sleep(POLL_SECONDS)
