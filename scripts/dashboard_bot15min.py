@@ -176,7 +176,13 @@ def fetch_live_prices() -> dict:
 DATA_API = os.getenv("POLYMARKET_DATA_API", "https://data-api.polymarket.com")
 
 def _balance_wallet_address() -> str | None:
-    """Wallet cujo saldo mostrar: signer (conta Polymarket) primeiro, senão FUNDER."""
+    """Wallet cujo saldo mostrar: FUNDER (proxy wallet) primeiro — é onde fica o USDC na Polymarket.
+    Data API retorna value=0 para EOA; o dinheiro está na proxy/funder."""
+    # FUNDER primeiro — proxy wallet onde fica o USDC
+    funder = (os.getenv("POLYMARKET_FUNDER") or "").strip()
+    if funder:
+        return funder if funder.startswith("0x") else "0x" + funder
+    # Fallback: derivar EOA da private key
     try:
         from eth_account import Account
         pk = (os.getenv("POLYMARKET_PRIVATE_KEY") or "").strip()
@@ -186,9 +192,6 @@ def _balance_wallet_address() -> str | None:
             return Account.from_key(pk).address
     except Exception:
         pass
-    funder = (os.getenv("POLYMARKET_FUNDER") or "").strip()
-    if funder:
-        return funder if funder.startswith("0x") else "0x" + funder
     return None
 
 
@@ -424,11 +427,12 @@ def compute_stats(events: list[dict]) -> dict:
         "filled_count": 0,
         "failed_count": 0,
         "skipped_count": 0,
-        "pnl_usdc": 0.0,
-        "trades_by_market": defaultdict(lambda: {"filled": 0, "failed": 0, "pnl": 0.0}),
+        "pnl_usdc": 0.0,          # Estimado (assume 100% win)
+        "pnl_real": 0.0,          # Real (de POSITION_RESULT)
+        "trades_by_market": defaultdict(lambda: {"filled": 0, "failed": 0, "pnl": 0.0, "pnl_real": 0.0}),
         "last_balance": None,
         "order_latencies_ms": [],
-        "position_results": [],  # lista de {"win": bool, "pnl": float} para Win Rate real
+        "position_results": [],  # lista de {"win": bool, "pnl": float, "market": str} para Win Rate real
     }
 
     seen_cycles = set()  # (market, cycle_end_ts)
@@ -467,7 +471,9 @@ def compute_stats(events: list[dict]) -> dict:
             win = e.get("win")
             pnl = _to_float(e.get("pnl"))
             if win is not None:
-                stats["position_results"].append({"win": bool(win), "pnl": pnl or 0.0})
+                stats["position_results"].append({"win": bool(win), "pnl": pnl or 0.0, "market": market})
+                stats["pnl_real"] += pnl or 0.0
+                stats["trades_by_market"][market]["pnl_real"] += pnl or 0.0
 
         if action == "SKIP_PRICE_OOR":
             stats["skipped_count"] += 1
@@ -664,7 +670,9 @@ def build_dashboard(events: list[dict], live_data: tuple | None = None) -> str:
     wins = sum(1 for r in results if r.get("win"))
     total_closed = len(results)
     win_rate = (wins / total_closed * 100) if total_closed > 0 else None
-    pnl = stats["pnl_usdc"]
+    # Usar P&L real (de POSITION_RESULT) quando disponível, senão estimado
+    has_real_pnl = total_closed > 0
+    pnl = stats["pnl_real"] if has_real_pnl else stats["pnl_usdc"]
     pnl_color = C.GREEN if pnl >= 0 else C.RED
     # Saldo: preferir valor atualizado por ciclo 15 min (live_balance), senão do log
     balance = live_balance if live_balance is not None else stats["last_balance"]
@@ -679,15 +687,15 @@ def build_dashboard(events: list[dict], live_data: tuple | None = None) -> str:
         f"{C.DIM}Falhas:{C.RESET} {C.RED}{stats['failed_count']}{C.RESET}   "
         f"{C.DIM}Execucao:{C.RESET} {C.BOLD}{exec_rate:.0f}%{C.RESET}   "
         f"{C.DIM}Win Rate:{C.RESET} {C.BOLD}{f'{win_rate:.0f}%' if win_rate is not None else '—'}{C.RESET}  {C.DIM}({total_closed} fechados){C.RESET}   "
-        f"{C.DIM}P&L (est):{C.RESET} {pnl_color}{C.BOLD}${pnl:+.2f}{C.RESET}"
+        f"{C.DIM}P&L:{C.RESET} {pnl_color}{C.BOLD}${pnl:+.2f}{C.RESET}{f' {C.DIM}(estimado se win){C.RESET}' if total_closed == 0 else ''}"
     )
     lines.append(f"  {C.DIM}Saldo USDC:{C.RESET} {bal_str}")
 
     # P&L por mercado (mini-tabela inline)
     pnl_parts = []
     for asset in ASSETS:
-        m_stats = stats["trades_by_market"].get(asset, {"filled": 0, "pnl": 0.0})
-        m_pnl = m_stats["pnl"]
+        m_stats = stats["trades_by_market"].get(asset, {"filled": 0, "pnl": 0.0, "pnl_real": 0.0})
+        m_pnl = m_stats["pnl_real"] if has_real_pnl else m_stats["pnl"]
         m_fills = m_stats["filled"]
         if m_fills > 0:
             pc = C.GREEN if m_pnl >= 0 else C.RED

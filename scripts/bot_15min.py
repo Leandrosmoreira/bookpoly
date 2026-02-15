@@ -52,7 +52,7 @@ ENTRY_WINDOW_END = 60      # Hard stop (1min)
 FILL_TIMEOUT = 5           # Segundos para aguardar fill por tentativa
 MAX_FILL_ATTEMPTS = 3      # Tentativas de ordem (1 inicial + 2 reenvios 1 tick abaixo) antes de SKIPPED
 MIN_SHARES = 6             # Quantidade por ordem
-MIN_PRICE = 0.95           # Preço mínimo para entrada (95%)
+MIN_PRICE = 0.93           # Preço mínimo para entrada (93%)
 MAX_PRICE = 0.98           # Preço máximo para entrada
 MIN_BALANCE_USDC = 6.5     # Saldo mínimo (USDC) para 6 shares @ 98%
 ORDER_FAIL_RETRY_DELAY = 2 # Segundos antes de reenviar após falha
@@ -614,6 +614,20 @@ def main():
             # 2. Detectar novo ciclo
             if ctx.cycle_end_ts != end_ts:
                 old_cycle = ctx.cycle_end_ts
+                # Gravar resultado da posição do ciclo anterior ANTES de resetar
+                if ctx.state == MarketState.HOLDING and ctx.entered_side and ctx.entered_price is not None and old_cycle is not None:
+                    outcome_winner = _get_resolved_outcome(asset, old_cycle)
+                    if outcome_winner is not None:
+                        win = ctx.entered_side == outcome_winner
+                        size = ctx.entered_size if ctx.entered_size is not None else MIN_SHARES
+                        pnl = (1.0 - ctx.entered_price) * size if win else -ctx.entered_price * size
+                        log_event("POSITION_RESULT", asset, ctx,
+                            outcome_winner=outcome_winner,
+                            side=ctx.entered_side,
+                            entry_price=ctx.entered_price,
+                            size=size,
+                            win=win,
+                            pnl=round(pnl, 2))
                 reset_context(ctx)
                 ctx.cycle_end_ts = end_ts
                 log_event("NEW_CYCLE", asset, ctx, end_ts=end_ts, title=market["title"])
@@ -621,23 +635,6 @@ def main():
             # 3. Já expirou?
             if time_to_expiry <= 0:
                 if ctx.state not in (MarketState.DONE, MarketState.SKIPPED):
-                    if ctx.state == MarketState.HOLDING and ctx.entered_side and ctx.entered_price is not None:
-                        outcome_winner = _get_resolved_outcome(asset, end_ts)
-                        if outcome_winner is not None:
-                            win = ctx.entered_side == outcome_winner
-                            size = ctx.entered_size if ctx.entered_size is not None else MIN_SHARES
-                            pnl = (1.0 - ctx.entered_price) * size if win else -ctx.entered_price * size
-                            log_event(
-                                "POSITION_RESULT",
-                                asset,
-                                ctx,
-                                outcome_winner=outcome_winner,
-                                side=ctx.entered_side,
-                                entry_price=ctx.entered_price,
-                                size=size,
-                                win=win,
-                                pnl=round(pnl, 2),
-                            )
                     ctx.state = MarketState.DONE
                     log_event("EXPIRED", asset, ctx)
                 continue
