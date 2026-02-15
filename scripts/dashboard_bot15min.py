@@ -14,6 +14,13 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
+# Carregar .env (mesmo que o bot) para POLYMARKET_PRIVATE_KEY / POLYMARKET_FUNDER
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).parent.parent / ".env")
+except ImportError:
+    pass
+
 try:
     import httpx
 except ImportError:
@@ -25,6 +32,7 @@ CLOB_HOST = os.getenv("CLOB_BASE_URL", "https://clob.polymarket.com")
 ASSETS = ["btc", "eth", "sol", "xrp"]
 ENTRY_WINDOW_START = 240   # 4 min antes da expiração
 ENTRY_WINDOW_END = 60      # 1 min antes (hard stop)
+WINDOW_SECONDS = 900        # 1 ciclo = 15 min (atualizar saldo por ciclo)
 
 # ─── Cores ANSI ──────────────────────────────────────────────────────────────
 
@@ -163,11 +171,180 @@ def fetch_live_prices() -> dict:
     return out, latency
 
 
+# ─── Portfolio / saldo (atualizado por ciclo 15 min) ──────────────────────────
+
+DATA_API = os.getenv("POLYMARKET_DATA_API", "https://data-api.polymarket.com")
+
+def _balance_wallet_address() -> str | None:
+    """Wallet cujo saldo mostrar: signer (conta Polymarket) primeiro, senão FUNDER."""
+    try:
+        from eth_account import Account
+        pk = (os.getenv("POLYMARKET_PRIVATE_KEY") or "").strip()
+        if pk:
+            if not pk.startswith("0x"):
+                pk = "0x" + pk
+            return Account.from_key(pk).address
+    except Exception:
+        pass
+    funder = (os.getenv("POLYMARKET_FUNDER") or "").strip()
+    if funder:
+        return funder if funder.startswith("0x") else "0x" + funder
+    return None
+
+
+def _get_proxy_wallet(eoa: str) -> str | None:
+    """Na Polymarket o USDC fica na proxy wallet, não na EOA. Busca proxy na Gamma API."""
+    if not httpx or not eoa:
+        return None
+    try:
+        r = httpx.get(
+            f"{GAMMA_HOST.rstrip('/')}/public-profile",
+            params={"address": eoa},
+            timeout=8,
+        )
+        if r.status_code != 200:
+            return None
+        data = r.json()
+        proxy = (data.get("proxyWallet") or "").strip()
+        if proxy and len(proxy) == 42 and proxy.startswith("0x"):
+            return proxy
+    except Exception:
+        pass
+    return None
+
+
+def _parse_value(raw) -> float | None:
+    """Extrai valor numérico (número, string ou dict com value)."""
+    if raw is None:
+        return None
+    if isinstance(raw, (int, float)):
+        return float(raw)
+    if isinstance(raw, str):
+        try:
+            return float(raw.replace(",", ".").strip())
+        except ValueError:
+            return None
+    if isinstance(raw, dict):
+        return _parse_value(raw.get("value") or raw.get("totalValue") or raw.get("balance"))
+    return None
+
+
+def _fetch_portfolio_from_api(wallet: str) -> tuple[float | None, float | None]:
+    """(portfolio_total, available_to_trade). GET data-api.polymarket.com/value?user=."""
+    if not httpx:
+        return None, None
+    try:
+        r = httpx.get(f"{DATA_API.rstrip('/')}/value", params={"user": wallet}, timeout=10)
+        if r.status_code != 200:
+            return None, None
+        data = r.json()
+        avail_keys = ("available", "availableToTrade", "available_to_trade", "cash", "balance")
+        value_keys = ("value", "totalValue", "total_value", "balance")
+        v, a = None, None
+        if isinstance(data, list) and len(data) > 0:
+            o = data[0]
+            if isinstance(o, dict):
+                v = next((_parse_value(o.get(k)) for k in value_keys if o.get(k) is not None), None)
+                a = next((_parse_value(o.get(k)) for k in avail_keys if o.get(k) is not None), None)
+            else:
+                v = _parse_value(o)
+        elif isinstance(data, dict):
+            v = next((_parse_value(data.get(k)) for k in value_keys if data.get(k) is not None), None)
+            a = next((_parse_value(data.get(k)) for k in avail_keys if data.get(k) is not None), None)
+        else:
+            v = _parse_value(data)
+            a = v
+        if v is not None:
+            return (v, a if a is not None else v)
+    except Exception:
+        pass
+    return None, None
+
+
+def _fetch_usdc_on_chain(wallet: str) -> float | None:
+    """Saldo USDC on-chain (Polygon) como fallback."""
+    try:
+        from web3 import Web3
+    except ImportError:
+        return None
+    usdc_address = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+    abi = [{"constant": True, "inputs": [{"name": "account", "type": "address"}], "name": "balanceOf", "outputs": [{"name": "", "type": "uint256"}], "type": "function"}]
+    try:
+        from polygon_rpc import get_web3_with_fallback, get_polygon_rpc_list
+        urls = get_polygon_rpc_list()
+        w3 = get_web3_with_fallback(timeout=5) if get_web3_with_fallback else None
+    except ImportError:
+        urls = [os.getenv("POLYGON_RPC", "https://polygon-rpc.com")]
+        w3 = None
+    if w3:
+        try:
+            usdc = w3.eth.contract(address=Web3.to_checksum_address(usdc_address), abi=abi)
+            raw = usdc.functions.balanceOf(Web3.to_checksum_address(wallet)).call()
+            return raw / 1e6
+        except Exception:
+            pass
+    for rpc in urls:
+        try:
+            w3 = Web3(Web3.HTTPProvider(rpc, request_kwargs={"timeout": 5}))
+            usdc = w3.eth.contract(address=Web3.to_checksum_address(usdc_address), abi=abi)
+            raw = usdc.functions.balanceOf(Web3.to_checksum_address(wallet)).call()
+            return raw / 1e6
+        except Exception:
+            continue
+    return None
+
+
+def fetch_usdc_balance() -> tuple[float | None, float | None]:
+    """(portfolio_total, available_to_trade). Data API com EOA ou proxy; fallback on-chain."""
+    eoa = _balance_wallet_address()
+    if not eoa:
+        return None, None
+    # Tentar Data API com EOA (conta conectada no site) e depois com proxy
+    for w in (eoa, _get_proxy_wallet(eoa)):
+        if not w:
+            continue
+        portfolio, available = _fetch_portfolio_from_api(w)
+        if portfolio is not None:
+            return (portfolio, available if available is not None else portfolio)
+    proxy_or_eoa = _get_proxy_wallet(eoa) or eoa
+    on_chain = _fetch_usdc_on_chain(proxy_or_eoa)
+    if on_chain is not None:
+        return (on_chain, on_chain)
+    return None, None
+
+
 # ─── Log ──────────────────────────────────────────────────────────────────────
 
 def get_log_path():
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     return LOG_DIR / f"bot_15min_{today}.jsonl"
+
+
+def load_all_historical_events(max_files: int = 31, max_lines_total: int = 50000) -> list[dict]:
+    """Carrega eventos de todos os logs bot_15min_*.jsonl para cálculo de histórico total."""
+    import glob
+    events: list[dict] = []
+    pattern = str(LOG_DIR / "bot_15min_*.jsonl")
+    for path in sorted(glob.glob(pattern), reverse=True)[:max_files]:
+        try:
+            with open(path) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        events.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        pass
+        except Exception:
+            pass
+        if len(events) >= max_lines_total:
+            break
+    if len(events) > max_lines_total:
+        events = events[-max_lines_total:]
+    # Ordem cronológica (arquivos lidos do mais novo ao mais antigo)
+    events.reverse()
+    return events
 
 
 def load_events(path: Path, max_lines: int = 5000) -> list[dict]:
@@ -195,7 +372,49 @@ def format_ts(ts: int | None) -> str:
     return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%H:%M:%S")
 
 
+def format_expiry(seconds: int) -> str:
+    """Formata tempo até expiração: 618 -> '10min 18s', 45 -> '45s'."""
+    if seconds <= 0:
+        return "0s"
+    m = seconds // 60
+    s = seconds % 60
+    if m == 0:
+        return f"{s}s"
+    return f"{m}min {s}s"
+
+
 # ─── Estatísticas ────────────────────────────────────────────────────────────
+
+def _median_ms(lst: list[float]) -> int | None:
+    """Mediana da lista em ms. Retorna None se vazia."""
+    if not lst:
+        return None
+    s = sorted(lst)
+    n = len(s)
+    if n % 2 == 1:
+        return int(s[n // 2])
+    return int((s[n // 2 - 1] + s[n // 2]) / 2)
+
+
+def compute_order_latencies_ms(events: list[dict]) -> list[float]:
+    """Retorna lista de latências em ms (PLACING_ORDER -> ORDER_PLACED/ORDER_FAILED) por (market, cycle)."""
+    pending: dict[tuple[str, int], int] = {}
+    out: list[float] = []
+    for e in events:
+        market = (e.get("market") or "").lower()
+        cycle = e.get("cycle_end_ts") or e.get("end_ts")
+        action = e.get("action", "")
+        ts = e.get("ts")
+        if action == "PLACING_ORDER" and cycle is not None and ts is not None:
+            pending[(market, cycle)] = ts
+        if action in ("ORDER_PLACED", "ORDER_FAILED"):
+            key = (market, cycle)
+            if key in pending and ts is not None:
+                out.append((ts - pending[key]) * 1000)
+            if key in pending:
+                del pending[key]
+    return out
+
 
 def compute_stats(events: list[dict]) -> dict:
     """Calcula P&L, win rate, contagens a partir dos eventos do dia."""
@@ -208,10 +427,14 @@ def compute_stats(events: list[dict]) -> dict:
         "pnl_usdc": 0.0,
         "trades_by_market": defaultdict(lambda: {"filled": 0, "failed": 0, "pnl": 0.0}),
         "last_balance": None,
+        "order_latencies_ms": [],
+        "position_results": [],  # lista de {"win": bool, "pnl": float} para Win Rate real
     }
 
     seen_cycles = set()  # (market, cycle_end_ts)
     entered_cycles = set()
+
+    stats["order_latencies_ms"] = compute_order_latencies_ms(events)
 
     for e in events:
         market = (e.get("market") or "").lower()
@@ -230,7 +453,7 @@ def compute_stats(events: list[dict]) -> dict:
             if price is not None:
                 # Lucro estimado: (1.00 - preço_entrada) × shares
                 # Quando o mercado resolve a favor, recebe $1 por share
-                size = _to_float(e.get("size")) or 5
+                size = _to_float(e.get("size")) or 6
                 profit = (1.0 - price) * size
                 stats["pnl_usdc"] += profit
                 stats["trades_by_market"][market]["pnl"] += profit
@@ -239,6 +462,12 @@ def compute_stats(events: list[dict]) -> dict:
         if action in ("ORDER_FAILED", "TIMEOUT_CANCEL", "CANCEL_HARD_STOP"):
             stats["failed_count"] += 1
             stats["trades_by_market"][market]["failed"] += 1
+
+        if action == "POSITION_RESULT":
+            win = e.get("win")
+            pnl = _to_float(e.get("pnl"))
+            if win is not None:
+                stats["position_results"].append({"win": bool(win), "pnl": pnl or 0.0})
 
         if action == "SKIP_PRICE_OOR":
             stats["skipped_count"] += 1
@@ -338,14 +567,21 @@ def color_price(price_str: str, is_entry: bool = False) -> str:
 
 def build_dashboard(events: list[dict], live_data: tuple | None = None) -> str:
     now = int(time.time())
-    window_start = (now // 900) * 900
-    window_end = window_start + 900
+    window_start = (now // WINDOW_SECONDS) * WINDOW_SECONDS
+    window_end = window_start + WINDOW_SECONDS
     elapsed = now - window_start
     time_to_expiry = window_end - now
     in_entry_window = ENTRY_WINDOW_END <= time_to_expiry <= ENTRY_WINDOW_START
 
+    live_balance = None
+    live_available = None
     if live_data is not None:
-        live_prices, latency_ms = live_data
+        live_prices = live_data[0]
+        latency_ms = live_data[1]
+        if len(live_data) >= 3:
+            live_balance = live_data[2]
+        if len(live_data) >= 4:
+            live_available = live_data[3]
     else:
         live_prices = {a: {"yes": None, "no": None, "spread": None} for a in ASSETS}
         latency_ms = 0
@@ -393,14 +629,21 @@ def build_dashboard(events: list[dict], live_data: tuple | None = None) -> str:
     lines.append(f"{C.BOLD}{C.CYAN}  BOT 15MIN — DASHBOARD LIVE v2{C.RESET}")
     lines.append(f"{C.BOLD}{C.CYAN}{'═' * W}{C.RESET}")
 
-    # Info janela
+    # Info janela + Portfolio e dinheiro para trade (atualizados a cada 10s)
     utc_now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    portfolio_val = live_balance if live_balance is not None else stats.get("last_balance")
+    portfolio_str = f"${portfolio_val:.2f}" if portfolio_val is not None else "—"
+    available_val = live_available if live_available is not None else portfolio_val
+    available_str = f"${available_val:.2f}" if available_val is not None else "—"
+    expiry_str = format_expiry(time_to_expiry)
     lines.append(f"  {C.DIM}UTC:{C.RESET} {utc_now}    "
                  f"{C.DIM}Janela:{C.RESET} {format_ts(window_start)}—{format_ts(window_end)}    "
-                 f"{C.DIM}Expira em:{C.RESET} {C.BOLD}{time_to_expiry}s{C.RESET}")
+                 f"{C.DIM}Expira em:{C.RESET} {C.BOLD}{expiry_str}{C.RESET}    "
+                 f"{C.DIM}Portfolio:{C.RESET} {C.BOLD}{portfolio_str}{C.RESET}    "
+                 f"{C.DIM}Dinheiro para trade:{C.RESET} {C.BOLD}{available_str}{C.RESET}")
 
     # Barra de progresso
-    bar = progress_bar(elapsed, 900, width=40)
+    bar = progress_bar(elapsed, WINDOW_SECONDS, width=40)
     if in_entry_window:
         entry_tag = f"  {C.BG_YELLOW}{C.BOLD} JANELA DE ENTRADA (4min→1min) {C.RESET}"
     elif time_to_expiry < ENTRY_WINDOW_END:
@@ -416,20 +659,29 @@ def build_dashboard(events: list[dict], live_data: tuple | None = None) -> str:
     lines.append(f"  {C.BOLD}{'─' * 42} STATS DO DIA {'─' * 32}{C.RESET}")
 
     total_trades = stats["filled_count"] + stats["failed_count"]
-    win_rate = (stats["filled_count"] / total_trades * 100) if total_trades > 0 else 0
+    exec_rate = (stats["filled_count"] / total_trades * 100) if total_trades > 0 else 0
+    results = stats.get("position_results") or []
+    wins = sum(1 for r in results if r.get("win"))
+    total_closed = len(results)
+    win_rate = (wins / total_closed * 100) if total_closed > 0 else None
     pnl = stats["pnl_usdc"]
     pnl_color = C.GREEN if pnl >= 0 else C.RED
-    bal_str = f"${stats['last_balance']:.2f}" if stats["last_balance"] is not None else "—"
+    # Saldo: preferir valor atualizado por ciclo 15 min (live_balance), senão do log
+    balance = live_balance if live_balance is not None else stats["last_balance"]
+    bal_str = f"${balance:.2f}" if balance is not None else "—"
+    if live_balance is not None:
+        bal_str = f"{C.BOLD}{bal_str}{C.RESET} {C.DIM}(atualizado por ciclo){C.RESET}"
 
     lines.append(
         f"  {C.DIM}Ciclos:{C.RESET} {stats['total_cycles']:>3}   "
         f"{C.DIM}Entradas:{C.RESET} {stats['entered_cycles']:>3}   "
         f"{C.DIM}Fills:{C.RESET} {C.GREEN}{stats['filled_count']}{C.RESET}   "
         f"{C.DIM}Falhas:{C.RESET} {C.RED}{stats['failed_count']}{C.RESET}   "
-        f"{C.DIM}Win Rate:{C.RESET} {C.BOLD}{win_rate:.0f}%{C.RESET}   "
-        f"{C.DIM}P&L (est):{C.RESET} {pnl_color}{C.BOLD}${pnl:+.2f}{C.RESET}   "
-        f"{C.DIM}Saldo:{C.RESET} {bal_str}"
+        f"{C.DIM}Execucao:{C.RESET} {C.BOLD}{exec_rate:.0f}%{C.RESET}   "
+        f"{C.DIM}Win Rate:{C.RESET} {C.BOLD}{f'{win_rate:.0f}%' if win_rate is not None else '—'}{C.RESET}  {C.DIM}({total_closed} fechados){C.RESET}   "
+        f"{C.DIM}P&L (est):{C.RESET} {pnl_color}{C.BOLD}${pnl:+.2f}{C.RESET}"
     )
+    lines.append(f"  {C.DIM}Saldo USDC:{C.RESET} {bal_str}")
 
     # P&L por mercado (mini-tabela inline)
     pnl_parts = []
@@ -497,9 +749,16 @@ def build_dashboard(events: list[dict], live_data: tuple | None = None) -> str:
             f" {result_col}"
         )
 
-    # ─── API Latência ─────────────────────────────────────────────────────
+    # ─── API Latência e latência de envio de ordem (mediana) ───────────────
     lat_color = C.GREEN if latency_ms < 2000 else (C.YELLOW if latency_ms < 5000 else C.RED)
     lines.append(f"\n  {C.DIM}API latencia:{C.RESET} {lat_color}{latency_ms}ms{C.RESET}")
+    order_lat = stats.get("order_latencies_ms") or []
+    mediana_hoje = _median_ms(order_lat)
+    if mediana_hoje is not None:
+        order_lat_color = C.GREEN if mediana_hoje < 1000 else (C.YELLOW if mediana_hoje < 3000 else C.RED)
+        lines.append(f"  {C.DIM}Envio ordem (mediana):{C.RESET} {order_lat_color}{mediana_hoje}ms{C.RESET}  {C.DIM}({len(order_lat)} ordens hoje){C.RESET}")
+    else:
+        lines.append(f"  {C.DIM}Envio ordem (mediana):{C.RESET} {C.GRAY}— (nenhuma ordem hoje){C.RESET}")
 
     # ─── Últimas ordens ──────────────────────────────────────────────────
     lines.append("")
@@ -574,7 +833,9 @@ def main():
                         f.seek(0, 2)
                         last_pos = f.tell()
 
-                live_data = fetch_live_prices()
+                live_prices, latency_ms = fetch_live_prices()
+                portfolio, available = fetch_usdc_balance()
+                live_data = (live_prices, latency_ms, portfolio, available)
                 os.system(clear_cmd)
                 print(build_dashboard(events, live_data))
                 time.sleep(10)

@@ -109,7 +109,7 @@ def status_label(ttl: int) -> str:
         return "FECHANDO (<1min)"
     if ttl <= ENTRY_WINDOW_START:
         return "JANELA ENTRADA (operando)"
-    return "AGUARDANDO (>4min)"
+    return "AGUARDANDO (>5min)"
 
 
 def main():

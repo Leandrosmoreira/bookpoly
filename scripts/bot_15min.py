@@ -49,9 +49,10 @@ CHAIN_ID = 137
 POLL_SECONDS = 1           # Intervalo do loop principal
 ENTRY_WINDOW_START = 240   # Segundos antes da expiração (4min)
 ENTRY_WINDOW_END = 60      # Hard stop (1min)
-FILL_TIMEOUT = 10          # Segundos para aguardar fill
+FILL_TIMEOUT = 5           # Segundos para aguardar fill por tentativa
+MAX_FILL_ATTEMPTS = 3      # Tentativas de ordem (1 inicial + 2 reenvios 1 tick abaixo) antes de SKIPPED
 MIN_SHARES = 6             # Quantidade por ordem
-MIN_PRICE = 0.93           # Preço mínimo para entrada
+MIN_PRICE = 0.95           # Preço mínimo para entrada (95%)
 MAX_PRICE = 0.98           # Preço máximo para entrada
 MIN_BALANCE_USDC = 6.5     # Saldo mínimo (USDC) para 6 shares @ 98%
 ORDER_FAIL_RETRY_DELAY = 2 # Segundos antes de reenviar após falha
@@ -209,6 +210,42 @@ def fetch_market_status(asset: str) -> Optional[dict]:
         return None
     except Exception as e:
         print(f"[ERRO] fetch_market_status({asset}): {e}")
+        return None
+
+
+def _get_resolved_outcome(asset: str, cycle_end_ts: int) -> Optional[str]:
+    """Retorna qual outcome venceu ('YES' ou 'NO') após resolução. None se ainda não resolvido ou API sem dado."""
+    try:
+        http = get_http()
+        window_start = cycle_end_ts - 900
+        slug = f"{asset}-updown-15m-{window_start}"
+        r = http.get(f"{GAMMA_HOST}/events/slug/{slug}")
+        if r.status_code != 200:
+            return None
+        event = r.json()
+        markets = event.get("markets", [])
+        if not markets:
+            return None
+        market = markets[0]
+        # outcomePrices após resolução: "1,0" = YES venceu, "0,1" = NO venceu
+        raw = market.get("outcomePrices")
+        if raw is None:
+            return None
+        if isinstance(raw, str):
+            raw = [s.strip() for s in raw.split(",")] if "," in raw else [raw]
+        if not isinstance(raw, (list, tuple)) or len(raw) < 2:
+            return None
+        try:
+            p0 = float(raw[0])
+            p1 = float(raw[1])
+        except (TypeError, ValueError):
+            return None
+        if p0 >= 0.99 and p1 <= 0.01:
+            return "YES"
+        if p1 >= 0.99 and p0 <= 0.01:
+            return "NO"
+        return None
+    except Exception:
         return None
 
 
@@ -584,6 +621,23 @@ def main():
             # 3. Já expirou?
             if time_to_expiry <= 0:
                 if ctx.state not in (MarketState.DONE, MarketState.SKIPPED):
+                    if ctx.state == MarketState.HOLDING and ctx.entered_side and ctx.entered_price is not None:
+                        outcome_winner = _get_resolved_outcome(asset, end_ts)
+                        if outcome_winner is not None:
+                            win = ctx.entered_side == outcome_winner
+                            size = ctx.entered_size if ctx.entered_size is not None else MIN_SHARES
+                            pnl = (1.0 - ctx.entered_price) * size if win else -ctx.entered_price * size
+                            log_event(
+                                "POSITION_RESULT",
+                                asset,
+                                ctx,
+                                outcome_winner=outcome_winner,
+                                side=ctx.entered_side,
+                                entry_price=ctx.entered_price,
+                                size=size,
+                                win=win,
+                                pnl=round(pnl, 2),
+                            )
                     ctx.state = MarketState.DONE
                     log_event("EXPIRED", asset, ctx)
                 continue
@@ -602,7 +656,7 @@ def main():
             if time_to_expiry > ENTRY_WINDOW_START:
                 continue
 
-            # 5b. SKIPPED mas ainda na janela (4min–1min) e preço no range 93%–98%? Uma nova chance no mesmo ciclo.
+            # 5b. SKIPPED mas ainda na janela (5min–1min) e preço no range 93%–98%? Uma nova chance no mesmo ciclo.
             if ctx.state == MarketState.SKIPPED and not ctx.skip_retried:
                 if (MIN_PRICE <= yes_price <= MAX_PRICE) or (MIN_PRICE <= no_price <= MAX_PRICE):
                     ctx.state = MarketState.IDLE
@@ -639,74 +693,49 @@ def main():
                 log_event("SKIP_INSUFFICIENT_BALANCE", asset, ctx, balance=round(balance, 2), required=MIN_BALANCE_USDC)
                 continue
 
-            # 8. Enviar ordem (com retry se falhar)
-            log_event("PLACING_ORDER", asset, ctx, side=side, price=price, size=MIN_SHARES, time_to_expiry=time_to_expiry)
-
-            order_id = place_order_with_retry(token_id, price, MIN_SHARES)
-            if not order_id:
-                ctx.state = MarketState.SKIPPED
-                log_event("ORDER_FAILED", asset, ctx)
-                continue
-
-            ctx.state = MarketState.ORDER_PLACED
-            ctx.order_id = order_id
-            # trade_attempts só sobe quando FILLED — assim pode reenviar após timeout
-
-            log_event("ORDER_PLACED", asset, ctx, side=side, price=price, order_id=order_id)
-
-            # 9. Aguardar fill (até 10s)
-            filled = wait_for_fill(order_id, timeout=FILL_TIMEOUT)
-
-            if filled:
-                ctx.trade_attempts += 1  # 1 fill por mercado por ciclo
-                ctx.state = MarketState.HOLDING
-                ctx.entered_side = side
-                ctx.entered_price = price
-                ctx.entered_size = MIN_SHARES
-                ctx.entered_ts = now
-                ctx.order_id = None
-                log_event("FILLED", asset, ctx, side=side, price=price)
-            else:
-                cancel_order(order_id)
-                ctx.order_id = None
-                log_event("TIMEOUT_CANCEL", asset, ctx, side=side, price=price)
-                # Reenviar 1 tick abaixo do best ask, respeitando teto 95%-98%
-                best_ask = get_best_ask(token_id)
-                if best_ask is not None:
-                    retry_price = max(0.01, min(MAX_PRICE, round(best_ask - 0.01, 2)))
-                    if retry_price < MIN_PRICE:
-                        ctx.trade_attempts += 1
-                        ctx.state = MarketState.SKIPPED
-                        continue
-                    log_event("PLACING_ORDER", asset, ctx, side=side, price=retry_price, size=MIN_SHARES, time_to_expiry=time_to_expiry, retry=True)
-                    order_id = place_order_with_retry(token_id, retry_price, MIN_SHARES)
-                    if order_id:
-                        ctx.state = MarketState.ORDER_PLACED
-                        ctx.order_id = order_id
-                        log_event("ORDER_PLACED", asset, ctx, side=side, price=retry_price, order_id=order_id)
-                        filled = wait_for_fill(order_id, timeout=FILL_TIMEOUT)
-                        if filled:
-                            ctx.trade_attempts += 1
-                            ctx.state = MarketState.HOLDING
-                            ctx.entered_side = side
-                            ctx.entered_price = retry_price
-                            ctx.entered_size = MIN_SHARES
-                            ctx.entered_ts = now
-                            ctx.order_id = None
-                            log_event("FILLED", asset, ctx, side=side, price=retry_price)
-                        else:
-                            cancel_order(order_id)
-                            ctx.trade_attempts += 1
-                            ctx.state = MarketState.SKIPPED
-                            ctx.order_id = None
-                            log_event("TIMEOUT_CANCEL", asset, ctx, side=side, price=retry_price)
-                    else:
-                        ctx.trade_attempts += 1
-                        ctx.state = MarketState.SKIPPED
-                        log_event("ORDER_FAILED", asset, ctx)
-                else:
+            # 8. Enviar ordem e aguardar fill — até MAX_FILL_ATTEMPTS tentativas (15s cada)
+            current_price = price
+            filled = False
+            for attempt in range(MAX_FILL_ATTEMPTS):
+                is_retry = attempt > 0
+                log_event("PLACING_ORDER", asset, ctx, side=side, price=current_price, size=MIN_SHARES, time_to_expiry=time_to_expiry, retry=is_retry)
+                order_id = place_order_with_retry(token_id, current_price, MIN_SHARES)
+                if not order_id:
                     ctx.trade_attempts += 1
                     ctx.state = MarketState.SKIPPED
+                    log_event("ORDER_FAILED", asset, ctx)
+                    break
+                ctx.state = MarketState.ORDER_PLACED
+                ctx.order_id = order_id
+                log_event("ORDER_PLACED", asset, ctx, side=side, price=current_price, order_id=order_id)
+                filled = wait_for_fill(order_id, timeout=FILL_TIMEOUT)
+                if filled:
+                    ctx.trade_attempts += 1
+                    ctx.state = MarketState.HOLDING
+                    ctx.entered_side = side
+                    ctx.entered_price = current_price
+                    ctx.entered_size = MIN_SHARES
+                    ctx.entered_ts = now
+                    ctx.order_id = None
+                    log_event("FILLED", asset, ctx, side=side, price=current_price)
+                    break
+                cancel_order(order_id)
+                ctx.order_id = None
+                log_event("TIMEOUT_CANCEL", asset, ctx, side=side, price=current_price)
+                if attempt + 1 >= MAX_FILL_ATTEMPTS:
+                    ctx.trade_attempts += 1
+                    ctx.state = MarketState.SKIPPED
+                    break
+                best_ask = get_best_ask(token_id)
+                if best_ask is None:
+                    ctx.trade_attempts += 1
+                    ctx.state = MarketState.SKIPPED
+                    break
+                current_price = max(0.01, min(MAX_PRICE, round(best_ask - 0.01, 2)))
+                if current_price < MIN_PRICE:
+                    ctx.trade_attempts += 1
+                    ctx.state = MarketState.SKIPPED
+                    break
 
         # Aguardar próximo ciclo
         time.sleep(POLL_SECONDS)
