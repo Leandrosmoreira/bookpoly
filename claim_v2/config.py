@@ -86,6 +86,9 @@ class ClaimV2Config:
     builder_secret: str = ""
     builder_passphrase: str = ""
 
+    # Funder address (proxy wallet que contém os tokens, Magic Link)
+    funder_address: str = ""
+
     # On-chain fallback
     gas_limit: int = 300000
 
@@ -99,6 +102,10 @@ class ClaimV2Config:
             self.rpc_url = urls[0] if urls else "https://polygon-rpc.com"
         if not self.safe_address:
             self.safe_address = os.getenv("POLYMARKET_SAFE_ADDRESS", "")
+
+        # Funder (proxy wallet com os tokens)
+        if not self.funder_address:
+            self.funder_address = os.getenv("POLY_FUNDER_ADDRESS", self.wallet_address)
 
         # Builder keys
         if not self.builder_api_key:
