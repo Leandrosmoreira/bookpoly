@@ -67,3 +67,91 @@ Pedido: subir para o git e que o analista valide se as implementações estão c
 - [ ] Docs: PASSO_A_PASSO e VERIFICAR_BTC5M coerentes com o uso do projeto.
 
 Obrigado por validar.
+
+---
+
+## 5. CLAIM v2 — Problema: Gasless não funciona (holder mismatch)
+
+**Arquivos:** `claim_v2/`, especialmente `gasless_redeemer.py`, `executor.py`, `debug/`
+
+### Problema identificado
+
+O `claim_v2` está tentando fazer **gasless redeem via Builder Relayer**, mas:
+
+1. **Gasless sempre falha** com `failed onchain, transaction_hash: !` (mesmo quando o SDK retorna `STATE_CONFIRMED/STATE_MINED`).
+2. **Fallback on-chain funciona** (tx entra, bloco confirmado), mas às vezes o saldo só atualiza quando o usuário clica manualmente no site.
+3. **Holder mismatch confirmado**: diagnóstico mostra que os tokens estão na **proxy wallet** (`0x0e958bbabdd7d1d8d7397e86668d6ee95db693ba`), não na Safe do Builder (`0xf5Ad9068c7145caC62551452Ba7bEC67Afde9722`).
+
+### Evidências técnicas
+
+- **Holder detector** (`claim_v2/debug/holder_detector.py`):
+  - Para cada `token_id`, consulta `balanceOf` no CTF para EOA, proxy e Safe.
+  - Resultado consistente: `proxy_balance > 0`, `eoa_balance = 0`, `safe_balance = 0`.
+  - Conclusão: **holder real = proxy wallet**, não Safe.
+
+- **SDK Python limitação**:
+  - O `py-builder-relayer-client` **não expõe** `RelayerTxType` (SAFE vs PROXY).
+  - O client TypeScript oficial (`@polymarket/builder-relayer-client`) tem `RelayerTxType.PROXY` e funciona.
+  - O SDK Python só permite usar o modo padrão (SAFE implícito), que opera sobre uma Safe diferente da proxy onde estão os tokens.
+
+- **Effect verifier** (`claim_v2/debug/effect_verifier.py`):
+  - Snapshot antes/depois de USDC + token CTF.
+  - Quando gasless "passa" mas não tem efeito → `NO_EFFECT` (token não queimado, USDC não creditado).
+
+### O que foi implementado
+
+1. **Módulos de debug** (`claim_v2/debug/`):
+   - `holder_detector.py`: identifica holder real (EOA/proxy/safe) via `balanceOf`.
+   - `effect_verifier.py`: compara saldos antes/depois para provar se teve efeito.
+   - `relayer_raw_logger.py`: persiste respostas cruas do relayer (sem secrets) em JSONL.
+
+2. **Executor com roteamento inteligente** (`claim_v2/executor.py`):
+   - Detecta holder antes de tentar redeem.
+   - Se holder = proxy/safe → tenta gasless primeiro.
+   - Se holder = EOA → vai direto on-chain.
+   - Se gasless não tiver efeito → marca como falha e não conta como sucesso.
+
+3. **Flags de debug** (`claim_v2/main.py`):
+   - `--debug-holder`: loga holder probe (EOA/proxy/safe balances).
+   - `--debug-verify`: snapshot antes/depois e classifica efeito (SUCCESS_EFFECT/NO_EFFECT/PARTIAL_EFFECT).
+   - `--debug-raw-relayer`: salva payload completo do relayer em `logs/relayer_raw_*.jsonl`.
+
+### Por que não funciona (hipótese principal)
+
+**Holder mismatch**: o gasless está tentando redimir via **Safe do Builder** (`0xf5Ad...`), mas os tokens estão na **proxy wallet** (`0x0e95...`). Como `redeemPositions` redime o que o `msg.sender` possui, e o `msg.sender` do gasless é a Safe (que não tem tokens), o redeem não tem efeito.
+
+**Solução necessária**:
+- Usar `RelayerTxType.PROXY` no SDK Python (mas ele não expõe isso).
+- **OU** migrar para TypeScript (`@polymarket/builder-relayer-client`) onde `RelayerTxType.PROXY` existe.
+- **OU** usar apenas on-chain direto (que funciona, mas paga POL).
+
+### Arquivos gerados (quando roda com debug)
+
+- `logs/claim_v2_redeemables_<timestamp>.json`: dump das posições encontradas.
+- `logs/relayer_raw_<timestamp>.jsonl`: eventos do relayer (execute, wait, deploy).
+- `logs/CLAIM_V2_DEBUG_REPORT.md`: resumo do run.
+
+### Comandos para diagnóstico
+
+```bash
+# Debug completo (lento, mas gera evidência)
+python -m claim_v2.main --debug-holder --debug-verify --debug-raw-relayer
+
+# Só verificar holder (rápido)
+python -m claim_v2.main --debug-holder
+
+# Uso normal (sem debug, rápido)
+python -m claim_v2.main
+```
+
+### Próximos passos sugeridos
+
+1. Validar se o SDK Python oficial tem como usar PROXY (ou se precisa de fork/wrapper).
+2. Considerar migrar para TypeScript se PROXY for essencial para gasless funcionar.
+3. Manter fallback on-chain como está (funciona, só paga POL).
+
+### Referências
+
+- Docs Builder: https://docs.polymarket.com/developers/builders/relayer-client
+- Repo TypeScript: https://github.com/Polymarket/builder-relayer-client
+- Repo Python: https://github.com/Polymarket/py-builder-relayer-client

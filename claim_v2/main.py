@@ -12,9 +12,12 @@ REQUER:
     - Para on-chain fallback: POL (MATIC) na wallet para gas
 """
 import argparse
+import json
 import logging
 import sys
 import time
+from datetime import datetime, timezone
+from pathlib import Path
 
 from .config import ClaimV2Config
 from .scanner import ScannerV2
@@ -33,6 +36,9 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 def main():
     parser = argparse.ArgumentParser(description="Claim v2 — Gasless + On-chain fallback")
     parser.add_argument("--loop", action="store_true", help="Rodar em loop (scan a cada 5 minutos)")
+    parser.add_argument("--debug-holder", action="store_true", help="Loga holder detector (EOA/Proxy/Safe)")
+    parser.add_argument("--debug-verify", action="store_true", help="Verifica efeito real (delta token/USDC)")
+    parser.add_argument("--debug-raw-relayer", action="store_true", help="Salva payload bruto de execute/wait do relayer")
     args = parser.parse_args()
 
     print("=" * 64)
@@ -57,7 +63,16 @@ def main():
 
     # Inicializar
     scanner = ScannerV2(config)
-    executor = ClaimExecutor(config)
+    run_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    logs_dir = Path(__file__).parent.parent / "logs"
+    executor = ClaimExecutor(
+        config,
+        debug_holder=args.debug_holder,
+        debug_verify=args.debug_verify,
+        debug_raw_relayer=args.debug_raw_relayer,
+        logs_dir=logs_dir,
+        run_id=run_id,
+    )
 
     if not executor.initialize():
         log.error("Falha ao inicializar executor")
@@ -71,18 +86,34 @@ def main():
 
     try:
         if args.loop:
-            run_loop(scanner, executor)
+            run_loop(scanner, executor, logs_dir=logs_dir, run_id=run_id, debug_mode=(args.debug_holder or args.debug_verify or args.debug_raw_relayer))
         else:
-            run_once(scanner, executor)
+            run_once(scanner, executor, logs_dir=logs_dir, run_id=run_id, debug_mode=(args.debug_holder or args.debug_verify or args.debug_raw_relayer))
     except KeyboardInterrupt:
         log.info("Interrompido pelo usuário")
     finally:
         scanner.close()
 
 
-def run_once(scanner: ScannerV2, executor: ClaimExecutor):
+def run_once(scanner: ScannerV2, executor: ClaimExecutor, *, logs_dir: Path, run_id: str, debug_mode: bool):
     """Um ciclo de scan + redeem."""
     positions = scanner.scan()
+    if debug_mode:
+        dump_path = logs_dir / f"claim_v2_redeemables_{run_id}.json"
+        payload = [
+            {
+                "condition_id": p.condition_id,
+                "token_id": p.token_id,
+                "outcome": p.outcome,
+                "outcome_index": p.outcome_index,
+                "shares": p.shares,
+                "market_slug": p.market_slug,
+                "title": p.title,
+            }
+            for p in positions
+        ]
+        dump_path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
+        log.info(f"Dump redeemables: {dump_path}")
 
     if not positions:
         log.info("Nenhuma posição para resgatar.")
@@ -103,14 +134,38 @@ def run_once(scanner: ScannerV2, executor: ClaimExecutor):
     log.info(f"  Já resgatados: {stats.already_redeemed}")
     log.info(f"  Falhas: {stats.failed}")
     log.info(f"  Total: {stats.total}")
+    if debug_mode:
+        report_path = logs_dir / "CLAIM_V2_DEBUG_REPORT.md"
+        report = "\n".join(
+            [
+                "# CLAIM V2 DEBUG REPORT",
+                "",
+                f"- Run ID: `{run_id}`",
+                f"- Gasless OK: `{stats.gasless_ok}`",
+                f"- On-chain OK: `{stats.onchain_ok}`",
+                f"- Already Redeemed: `{stats.already_redeemed}`",
+                f"- Failed: `{stats.failed}`",
+                "",
+                "## Arquivos gerados",
+                f"- `logs/claim_v2_redeemables_{run_id}.json`",
+                f"- `logs/relayer_raw_{run_id}.jsonl` (se `--debug-raw-relayer`)",
+                "",
+                "## Nota",
+                "- Se houver falha com holder `proxy/safe`, o fallback on-chain via EOA nao resolve.",
+                "- Verifique eventos `holder_probe` e `effect_result` para confirmar holder mismatch.",
+                "",
+            ]
+        )
+        report_path.write_text(report, encoding="utf-8")
+        log.info(f"Debug report: {report_path}")
 
 
-def run_loop(scanner: ScannerV2, executor: ClaimExecutor):
+def run_loop(scanner: ScannerV2, executor: ClaimExecutor, *, logs_dir: Path, run_id: str, debug_mode: bool):
     """Loop contínuo — scan a cada 5 minutos."""
     log.info("Modo loop (Ctrl+C para parar)")
     while True:
         try:
-            run_once(scanner, executor)
+            run_once(scanner, executor, logs_dir=logs_dir, run_id=run_id, debug_mode=debug_mode)
             log.info("Próximo scan em 5 minutos...")
             time.sleep(300)
         except KeyboardInterrupt:

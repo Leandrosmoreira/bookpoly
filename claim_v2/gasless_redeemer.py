@@ -14,6 +14,7 @@ from eth_abi import encode as abi_encode
 from web3 import Web3
 
 from .config import ClaimV2Config, CTF_ADDRESS, NEG_RISK_ADAPTER, USDC_ADDRESS
+from .debug.relayer_raw_logger import RelayerRawLogger
 
 log = logging.getLogger(__name__)
 
@@ -34,16 +35,26 @@ class GaslessResult:
 
 
 class GaslessRedeemer:
-    """Resgata posições via Polymarket Relayer (0 gas)."""
+    """Resgata posições via Polymarket Relayer (0 gas).
 
-    def __init__(self, config: ClaimV2Config):
+    IMPORTANTE:
+    - Mesmo que o relayer responda OK, validamos on-chain se o token foi queimado.
+      Se ainda houver saldo do token, consideramos falha e deixamos o executor
+      cair para o fallback on-chain.
+    """
+
+    def __init__(self, config: ClaimV2Config, raw_logger: Optional[RelayerRawLogger] = None):
         self.config = config
         self._client = None
         self._safe_address: Optional[str] = None
         self._initialized = False
+        self.raw = raw_logger
+        # Web3 / contrato para checar saldo após o gasless
+        self._w3: Optional[Web3] = None
+        self._contract = None
 
     def _init_client(self):
-        """Inicializa RelayClient com Builder API keys."""
+        """Inicializa RelayClient com Builder API keys (SDK Python oficial)."""
         if self._initialized:
             return
 
@@ -62,6 +73,8 @@ class GaslessRedeemer:
         if not pk.startswith("0x"):
             pk = "0x" + pk
 
+        # OBS: SDK Python atual não expõe RelayerTxType (SAFE/PROXY).
+        # Mantemos construtor oficial e auditamos holder/efeito no executor.
         self._client = RelayClient(
             self.config.relayer_url,
             self.config.chain_id,
@@ -73,28 +86,29 @@ class GaslessRedeemer:
         log.info("RelayClient inicializado (gasless)")
 
     def ensure_safe_deployed(self) -> bool:
-        """Verifica se a Safe wallet está deployed. Se não, faz deploy."""
+        """Se houver API de Safe, tenta informar/deploy; senão segue."""
         self._init_client()
-
         try:
-            safe_address = self._client.get_expected_safe()
-            self._safe_address = safe_address
-            log.info(f"Safe address: {safe_address}")
-
-            deployed = self._client.get_deployed(safe_address)
+            safe = self._client.get_expected_safe()
+            self._safe_address = safe
+            log.info(f"Safe address: {safe}")
+            deployed = self._client.get_deployed(safe)
             if deployed:
                 log.info("Safe já deployed")
                 return True
-
             log.info("Deploying Safe wallet...")
             response = self._client.deploy()
+            if self.raw:
+                self.raw.log("relayer_deploy_response", getattr(response, "__dict__", str(response)))
             result = response.wait()
+            if self.raw:
+                self.raw.log("relayer_deploy_wait", result)
             log.info(f"Safe deployed! TX: {result}")
             return True
-
         except Exception as e:
-            log.error(f"Erro ao verificar/deploy Safe: {e}")
-            return False
+            # Alguns fluxos/proxy podem não expor métodos de safe
+            log.info(f"Safe deploy/check não aplicado: {e}")
+            return True
 
     def _encode_redeem_data(self, condition_id: str, outcome_index: int) -> str:
         """Codifica chamada redeemPositions() como hex data."""
@@ -119,12 +133,58 @@ class GaslessRedeemer:
 
         return "0x" + (REDEEM_SELECTOR + params).hex()
 
+    # ─── Verificação on-chain após gasless ────────────────────────────────
+
+    def _get_w3(self) -> Web3:
+        """Conecta a um RPC da lista para checar saldo do token."""
+        if self._w3 is not None:
+            return self._w3
+        # Import tardio para evitar ciclo
+        from .config import CTF_ABI  # type: ignore
+
+        for rpc_url in self.config.rpc_urls:
+            try:
+                request_kwargs = {"timeout": 10}
+                try:
+                    from polygon_rpc import get_request_kwargs_for_rpc  # type: ignore
+
+                    request_kwargs.update(get_request_kwargs_for_rpc(rpc_url, timeout=10))
+                except ImportError:
+                    pass
+                w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs=request_kwargs))
+                if w3.is_connected():
+                    self._w3 = w3
+                    self._contract = w3.eth.contract(
+                        address=Web3.to_checksum_address(self.config.ctf_address),
+                        abi=CTF_ABI,
+                    )
+                    return w3
+            except Exception:
+                continue
+        raise RuntimeError("Cannot connect to any Polygon RPC for gasless verify")
+
+    def _has_balance(self, token_id: str) -> bool:
+        """Verifica se ainda existe saldo desse token após o gasless."""
+        try:
+            w3 = self._get_w3()
+            if not self._contract:
+                return True
+            balance = self._contract.functions.balanceOf(
+                Web3.to_checksum_address(self.config.wallet_address),
+                int(token_id),
+            ).call()
+            return balance > 0
+        except Exception as e:
+            # Em dúvida, não confiamos no gasless e deixamos fallback decidir.
+            log.warning(f"  Erro ao verificar saldo após gasless: {e}")
+            return True
+
     def redeem(self, position) -> GaslessResult:
         """Resgata uma posição via Relayer."""
         try:
             self._init_client()
 
-            from py_builder_relayer_client.models import SafeTransaction, OperationType
+            from py_builder_relayer_client.models import OperationType, SafeTransaction
 
             # Codificar chamada
             call_data = self._encode_redeem_data(
@@ -148,12 +208,42 @@ class GaslessRedeemer:
             response = self._client.execute([tx])
             tx_id = getattr(response, "transaction_id", "") or ""
             tx_hash = getattr(response, "transaction_hash", "") or ""
+            if self.raw:
+                self.raw.log(
+                    "relayer_execute_response",
+                    {
+                        "tx_id": tx_id,
+                        "tx_hash": tx_hash,
+                        "response": getattr(response, "__dict__", str(response)),
+                        "position": {
+                            "market_slug": position.market_slug,
+                            "condition_id": position.condition_id,
+                            "outcome_index": position.outcome_index,
+                        },
+                    },
+                )
 
             log.info(f"  Relayer TX ID: {tx_id[:20]}...")
 
             # Aguardar confirmação
             result = response.wait()
-            log.info(f"  Gasless redeem OK!")
+            if self.raw:
+                self.raw.log("relayer_wait_result", result)
+
+            # Verificar se o relayer reportou estado ruim (quando disponível)
+            state = ""
+            try:
+                state = getattr(result, "state", "") or (result.get("state") if isinstance(result, dict) else "")
+            except Exception:
+                state = ""
+            if state and state not in ("STATE_CONFIRMED", "STATE_MINED"):
+                raise RuntimeError(f"Gasless tx state={state}")
+
+            # Verificação extra: saldo on-chain do token deve ir a zero
+            if self._has_balance(position.token_id):
+                raise RuntimeError("Gasless não queimou o token (saldo on-chain ainda > 0)")
+
+            log.info("  Gasless redeem OK!")
 
             return GaslessResult(
                 success=True,
