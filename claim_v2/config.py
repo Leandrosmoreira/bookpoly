@@ -66,6 +66,7 @@ class ClaimV2Config:
     # Wallet
     private_key: str = ""
     wallet_address: str = ""  # Proxy wallet (funder)
+    safe_address: str = ""    # Safe wallet (opcional, para diagnóstico)
 
     # Network
     rpc_url: str = ""
@@ -96,6 +97,8 @@ class ClaimV2Config:
         if not self.rpc_url:
             urls = self.rpc_urls
             self.rpc_url = urls[0] if urls else "https://polygon-rpc.com"
+        if not self.safe_address:
+            self.safe_address = os.getenv("POLYMARKET_SAFE_ADDRESS", "")
 
         # Builder keys
         if not self.builder_api_key:

@@ -4,13 +4,14 @@ Executor — Orquestra: gasless (Relayer) → fallback on-chain.
 import logging
 import time
 from dataclasses import dataclass
-from typing import Optional
+from pathlib import Path
 
-from web3 import Web3
-
-from .config import ClaimV2Config, CTF_ABI
-from .gasless_redeemer import GaslessRedeemer, GaslessResult
-from .onchain_redeemer import OnchainRedeemer, OnchainResult
+from .config import ClaimV2Config
+from .debug.effect_verifier import EffectVerifier
+from .debug.holder_detector import HolderDetector
+from .debug.relayer_raw_logger import RelayerRawLogger
+from .gasless_redeemer import GaslessRedeemer
+from .onchain_redeemer import OnchainRedeemer
 
 log = logging.getLogger(__name__)
 
@@ -27,15 +28,28 @@ class RedeemStats:
 class ClaimExecutor:
     """Orquestra redeem: tenta gasless primeiro, fallback on-chain."""
 
-    def __init__(self, config: ClaimV2Config):
+    def __init__(
+        self,
+        config: ClaimV2Config,
+        *,
+        debug_holder: bool = False,
+        debug_verify: bool = False,
+        debug_raw_relayer: bool = False,
+        logs_dir: Path | None = None,
+        run_id: str = "run",
+    ):
         self.config = config
         self.gasless: GaslessRedeemer | None = None
         self.onchain = OnchainRedeemer(config)
-        self._w3: Optional[Web3] = None
-        self._contract = None
+        self.logs_dir = logs_dir or (Path(__file__).parent.parent / "logs")
+        self.run_id = run_id
+
+        self.raw_logger = RelayerRawLogger(self.logs_dir, run_id, enabled=debug_raw_relayer)
+        self.holder_detector = HolderDetector(config, self.logs_dir, run_id, enabled=debug_holder)
+        self.effect_verifier = EffectVerifier(config, self.logs_dir, run_id, enabled=debug_verify) if debug_verify else None
 
         if config.has_builder_keys:
-            self.gasless = GaslessRedeemer(config)
+            self.gasless = GaslessRedeemer(config, raw_logger=self.raw_logger)
             log.info("Gasless redeemer habilitado (Builder keys configuradas)")
         else:
             log.warning("Builder keys não configuradas — apenas on-chain (paga POL)")
@@ -57,77 +71,95 @@ class ClaimExecutor:
 
         return True
 
-    # ─── Verificação on-chain após redeem ───────────────────────────────────
-
-    def _get_w3(self) -> Web3:
-        """Conecta a um RPC para verificar saldo de token CTF."""
-        if self._w3 is not None:
-            return self._w3
-
-        for rpc_url in self.config.rpc_urls:
-            try:
-                request_kwargs = {"timeout": 10}
-                try:
-                    from polygon_rpc import get_request_kwargs_for_rpc  # type: ignore
-
-                    request_kwargs.update(get_request_kwargs_for_rpc(rpc_url, timeout=10))
-                except ImportError:
-                    pass
-                w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs=request_kwargs))
-                if w3.is_connected():
-                    self._w3 = w3
-                    self._contract = w3.eth.contract(
-                        address=Web3.to_checksum_address(self.config.ctf_address),
-                        abi=CTF_ABI,
-                    )
-                    return w3
-            except Exception:
-                continue
-        raise RuntimeError("Cannot connect to any Polygon RPC for verify")
-
-    def _has_balance_onchain(self, token_id: str) -> bool:
-        """Retorna True se ainda houver saldo desse token na wallet."""
-        try:
-            w3 = self._get_w3()
-            if not self._contract:
-                return True
-            balance = self._contract.functions.balanceOf(
-                Web3.to_checksum_address(self.config.wallet_address),
-                int(token_id),
-            ).call()
-            return balance > 0
-        except Exception as e:
-            log.warning(f"  Erro ao verificar saldo on-chain pós-redeem: {e}")
-            # Em dúvida, melhor considerar que ainda há saldo (não confiar cegamente)
-            return True
-
     def redeem(self, position) -> dict:
         """Resgata uma posição. Tenta gasless → fallback on-chain."""
-        result = {"success": False, "method": "none", "tx_hash": "", "error": ""}
+        # Detectar holder real (EOA/Proxy/Safe)
+        probe = self.holder_detector.probe(position.token_id)
+        log.info(
+            "  Holder probe: holder=%s role=%s | eoa=%s proxy=%s safe=%s",
+            probe.holder_address or "UNKNOWN",
+            probe.holder_role,
+            probe.eoa_balance,
+            probe.proxy_balance,
+            probe.safe_balance,
+        )
+        self.raw_logger.log(
+            "redeem_route_probe",
+            {
+                "market_slug": position.market_slug,
+                "token_id": position.token_id,
+                "condition_id": position.condition_id,
+                "holder_role": probe.holder_role,
+                "holder_address": probe.holder_address,
+                "balances": {
+                    "eoa": probe.eoa_balance,
+                    "proxy": probe.proxy_balance,
+                    "safe": probe.safe_balance,
+                },
+            },
+        )
 
-        # 1. Tentar gasless
-        if self.gasless:
-            gasless_result = self.gasless.redeem(position)
-            if gasless_result.success:
-                return {
-                    "success": True,
-                    "method": "gasless",
-                    "tx_hash": gasless_result.tx_hash or gasless_result.tx_id,
-                    "error": "",
-                }
-            log.info(f"  Gasless falhou, tentando on-chain...")
+        if probe.holder_role == "unknown":
+            return {"success": False, "method": "failed", "tx_hash": "", "error": "holder_unknown"}
 
-        # 2. Fallback on-chain
-        onchain_result = self.onchain.redeem(position)
-        if onchain_result.success:
-            # Verificar se o token foi realmente queimado
-            if self._has_balance_onchain(position.token_id):
+        before = None
+        if self.effect_verifier and probe.holder_address:
+            before = self.effect_verifier.snapshot(probe.holder_address, position.token_id)
+
+        # Rota A: holder proxy/safe -> preferir gasless
+        if probe.holder_role in ("proxy", "safe"):
+            if self.gasless:
+                gasless_result = self.gasless.redeem(position)
+                if gasless_result.success:
+                    if self.effect_verifier and before:
+                        after = self.effect_verifier.snapshot(probe.holder_address, position.token_id)
+                        effect = self.effect_verifier.classify(before, after)
+                        if effect.get("result") == "SUCCESS_EFFECT":
+                            return {
+                                "success": True,
+                                "method": "gasless",
+                                "tx_hash": gasless_result.tx_hash or gasless_result.tx_id,
+                                "error": "",
+                            }
+                        return {
+                            "success": False,
+                            "method": "failed",
+                            "tx_hash": gasless_result.tx_hash or gasless_result.tx_id,
+                            "error": f"gasless_{effect.get('result', 'NO_EFFECT').lower()}",
+                        }
+                    return {
+                        "success": True,
+                        "method": "gasless",
+                        "tx_hash": gasless_result.tx_hash or gasless_result.tx_id,
+                        "error": "",
+                    }
+                # Proxy/Safe não pode ser resgatado por EOA direto
                 return {
                     "success": False,
                     "method": "failed",
-                    "tx_hash": onchain_result.tx_hash,
-                    "error": "onchain_redeem_no_burn",
+                    "tx_hash": "",
+                    "error": f"gasless_failed_for_{probe.holder_role}_holder:{gasless_result.error}",
                 }
+            return {
+                "success": False,
+                "method": "failed",
+                "tx_hash": "",
+                "error": f"{probe.holder_role}_holder_requires_gasless",
+            }
+
+        # Rota B: holder EOA -> on-chain direto
+        onchain_result = self.onchain.redeem(position)
+        if onchain_result.success:
+            if self.effect_verifier and before:
+                after = self.effect_verifier.snapshot(probe.holder_address, position.token_id)
+                effect = self.effect_verifier.classify(before, after)
+                if effect.get("result") != "SUCCESS_EFFECT":
+                    return {
+                        "success": False,
+                        "method": "failed",
+                        "tx_hash": onchain_result.tx_hash,
+                        "error": f"onchain_{effect.get('result', 'NO_EFFECT').lower()}",
+                    }
             return {
                 "success": True,
                 "method": "onchain",
@@ -135,7 +167,6 @@ class ClaimExecutor:
                 "error": "",
             }
 
-        # Verificar se é "already_redeemed"
         if onchain_result.error == "already_redeemed":
             return {
                 "success": False,
@@ -143,13 +174,7 @@ class ClaimExecutor:
                 "tx_hash": onchain_result.tx_hash,
                 "error": "already_redeemed",
             }
-
-        return {
-            "success": False,
-            "method": "failed",
-            "tx_hash": "",
-            "error": onchain_result.error,
-        }
+        return {"success": False, "method": "failed", "tx_hash": "", "error": onchain_result.error}
 
     def redeem_all(self, positions: list) -> RedeemStats:
         """Resgata todas as posições com delay entre cada uma."""

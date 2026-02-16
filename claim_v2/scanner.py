@@ -91,7 +91,11 @@ class ScannerV2:
             return None
 
     def scan(self) -> list[RedeemablePosition]:
-        """Scan + filtrar posições com saldo on-chain > 0 e apenas de hoje."""
+        """Scan e filtra por data (apenas hoje).
+
+        Nao filtra por balanceOf da wallet aqui, porque o holder efetivo pode ser
+        EOA/Proxy/Safe e essa decisao agora e feita no HolderDetector do executor.
+        """
         positions = self.scanner.scan()
         if not positions:
             return []
@@ -103,10 +107,7 @@ class ScannerV2:
             if end_ts is not None and end_ts < min_end_ts:
                 log.info(f"  Skip (mercado antigo, end_ts<{min_end_ts}): {pos.market_slug}")
                 continue
-            if self._has_balance(pos.token_id):
-                filtered.append(pos)
-            else:
-                log.info(f"  Skip (saldo on-chain=0): {pos.market_slug}")
+            filtered.append(pos)
 
         return filtered
 
