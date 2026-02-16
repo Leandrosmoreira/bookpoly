@@ -26,6 +26,7 @@ from typing import Optional
 
 import httpx
 from dotenv import load_dotenv
+from guardrails import GuardrailsPro, GuardrailAction
 
 load_dotenv(Path(__file__).parent.parent / ".env")
 
@@ -582,6 +583,7 @@ def main():
 
     # Inicializar contextos
     contexts = {asset: MarketContext(asset=asset) for asset in ASSETS}
+    guardrails = {asset: GuardrailsPro(asset=asset) for asset in ASSETS}
 
     print("Iniciando loop principal... (Ctrl+C para parar)")
     print()
@@ -604,6 +606,7 @@ def main():
             time_to_expiry = end_ts - now
             yes_price = market["yes_price"]
             no_price = market["no_price"]
+            guardrails[asset].update(float(now), yes_price, no_price)
             yes_token = market["yes_token"]
             no_token = market["no_token"]
 
@@ -629,6 +632,7 @@ def main():
                             win=win,
                             pnl=round(pnl, 2))
                 reset_context(ctx)
+                guardrails[asset].reset()
                 ctx.cycle_end_ts = end_ts
                 log_event("NEW_CYCLE", asset, ctx, end_ts=end_ts, title=market["title"])
 
@@ -682,6 +686,23 @@ def main():
             if not side:
                 # Na janela mas preço fora do range 95%-98% — log para diagnóstico
                 log_event("SKIP_PRICE_OOR", asset, ctx, yes_price=round(yes_price, 2), no_price=round(no_price, 2), time_to_expiry=time_to_expiry)
+                continue
+
+            # 7a. Guardrails PRO — filtro de entrada inteligente
+            gr_decision = guardrails[asset].evaluate(side, float(now))
+            log_event("GUARDRAIL_DECISION", asset, ctx,
+                action=gr_decision.action.value, side=side,
+                risk_score=gr_decision.risk_score,
+                pump=gr_decision.pump_score,
+                stability=gr_decision.stability_score,
+                time_in_band=gr_decision.time_in_band_s,
+                momentum=gr_decision.momentum_score,
+                t_remaining=time_to_expiry,
+                reason=gr_decision.reason)
+            if gr_decision.action == GuardrailAction.BLOCK:
+                log_event("GUARDRAIL_BLOCK", asset, ctx,
+                    side=side, risk_score=gr_decision.risk_score,
+                    reason=gr_decision.reason)
                 continue
 
             # 7b. Verificar saldo USDC antes de enviar ordem
