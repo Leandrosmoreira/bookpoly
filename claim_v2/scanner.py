@@ -3,6 +3,7 @@ Scanner v2 — reutiliza claim.scanner + verifica balance on-chain.
 """
 import logging
 import time
+from datetime import datetime, timezone
 from typing import Optional
 
 from web3 import Web3
@@ -69,14 +70,39 @@ class ScannerV2:
                 return True  # Em dúvida, tenta resgatar
         return True
 
+    def _get_today_min_end_ts(self) -> int:
+        """Retorna timestamp de hoje 00:00:00 UTC para filtrar claims."""
+        today = datetime.now(timezone.utc).date()
+        start = datetime(today.year, today.month, today.day, tzinfo=timezone.utc)
+        return int(start.timestamp())
+
+    @staticmethod
+    def _extract_end_ts(slug: str) -> Optional[int]:
+        """Extrai end_ts do slug (ex.: btc-updown-15m-1771240500)."""
+        try:
+            parts = slug.split("-")
+            if not parts:
+                return None
+            last = parts[-1]
+            if not last.isdigit():
+                return None
+            return int(last)
+        except Exception:
+            return None
+
     def scan(self) -> list[RedeemablePosition]:
-        """Scan + filtrar posições com saldo on-chain > 0."""
+        """Scan + filtrar posições com saldo on-chain > 0 e apenas de hoje."""
         positions = self.scanner.scan()
         if not positions:
             return []
 
+        min_end_ts = self._get_today_min_end_ts()
         filtered = []
         for pos in positions:
+            end_ts = self._extract_end_ts(pos.market_slug)
+            if end_ts is not None and end_ts < min_end_ts:
+                log.info(f"  Skip (mercado antigo, end_ts<{min_end_ts}): {pos.market_slug}")
+                continue
             if self._has_balance(pos.token_id):
                 filtered.append(pos)
             else:

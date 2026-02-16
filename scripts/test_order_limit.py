@@ -135,7 +135,7 @@ def find_btc_15min_market() -> dict | None:
             tokens = raw or []
         if len(tokens) < 2:
             print("Mercado sem 2 tokens")
-            return None
+        return None
 
         # Retornar no formato esperado pelo main: token_id YES = primeiro
         print(f"Mercado encontrado: {event.get('title', slug)}")
@@ -222,18 +222,18 @@ def place_limit_order(
         headers = sign_request(api_secret, "POST", path, body, poly_address=poly_addr)
 
         print(f"\nEnviando ordem (POLY_ADDRESS={poly_addr_label}):")
-        print(f"  Token: {token_id[:20]}...")
-        print(f"  Side: {side}")
-        print(f"  Size: {size} shares")
-        print(f"  Price: ${price}")
+    print(f"  Token: {token_id[:20]}...")
+    print(f"  Side: {side}")
+    print(f"  Size: {size} shares")
+    print(f"  Price: ${price}")
         print(f"  PostOnly: True (type 1)")
 
         with httpx.Client(timeout=30) as client_http:
             response = client_http.post(
-                f"{CLOB_HOST}{path}",
-                headers=headers,
-                content=body,
-            )
+            f"{CLOB_HOST}{path}",
+            headers=headers,
+            content=body,
+        )
         print(f"\nResposta: {response.status_code}")
         if response.status_code == 200:
             result = response.json()
@@ -251,7 +251,7 @@ def place_limit_order(
             print("  Para type 1, keys geradas com generate_api_keys.py ficam no signer (EOA).")
         print(f"Erro: {err_text}")
         return None
-    return None
+            return None
 
 
 def main():

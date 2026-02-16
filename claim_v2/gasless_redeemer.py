@@ -34,13 +34,22 @@ class GaslessResult:
 
 
 class GaslessRedeemer:
-    """Resgata posições via Polymarket Relayer (0 gas)."""
+    """Resgata posições via Polymarket Relayer (0 gas).
+
+    IMPORTANTE:
+    - Mesmo que o relayer responda OK, validamos on-chain se o token foi queimado.
+      Se ainda houver saldo do token, consideramos falha e deixamos o executor
+      cair para o fallback on-chain.
+    """
 
     def __init__(self, config: ClaimV2Config):
         self.config = config
         self._client = None
         self._safe_address: Optional[str] = None
         self._initialized = False
+        # Web3 / contrato para checar saldo após o gasless
+        self._w3: Optional[Web3] = None
+        self._contract = None
 
     def _init_client(self):
         """Inicializa RelayClient com Builder API keys."""
@@ -119,6 +128,52 @@ class GaslessRedeemer:
 
         return "0x" + (REDEEM_SELECTOR + params).hex()
 
+    # ─── Verificação on-chain após gasless ────────────────────────────────
+
+    def _get_w3(self) -> Web3:
+        """Conecta a um RPC da lista para checar saldo do token."""
+        if self._w3 is not None:
+            return self._w3
+        # Import tardio para evitar ciclo
+        from .config import CTF_ABI  # type: ignore
+
+        for rpc_url in self.config.rpc_urls:
+            try:
+                request_kwargs = {"timeout": 10}
+                try:
+                    from polygon_rpc import get_request_kwargs_for_rpc  # type: ignore
+
+                    request_kwargs.update(get_request_kwargs_for_rpc(rpc_url, timeout=10))
+                except ImportError:
+                    pass
+                w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs=request_kwargs))
+                if w3.is_connected():
+                    self._w3 = w3
+                    self._contract = w3.eth.contract(
+                        address=Web3.to_checksum_address(self.config.ctf_address),
+                        abi=CTF_ABI,
+                    )
+                    return w3
+            except Exception:
+                continue
+        raise RuntimeError("Cannot connect to any Polygon RPC for gasless verify")
+
+    def _has_balance(self, token_id: str) -> bool:
+        """Verifica se ainda existe saldo desse token após o gasless."""
+        try:
+            w3 = self._get_w3()
+            if not self._contract:
+                return True
+            balance = self._contract.functions.balanceOf(
+                Web3.to_checksum_address(self.config.wallet_address),
+                int(token_id),
+            ).call()
+            return balance > 0
+        except Exception as e:
+            # Em dúvida, não confiamos no gasless e deixamos fallback decidir.
+            log.warning(f"  Erro ao verificar saldo após gasless: {e}")
+            return True
+
     def redeem(self, position) -> GaslessResult:
         """Resgata uma posição via Relayer."""
         try:
@@ -153,7 +208,21 @@ class GaslessRedeemer:
 
             # Aguardar confirmação
             result = response.wait()
-            log.info(f"  Gasless redeem OK!")
+
+            # Verificar se o relayer reportou estado ruim (quando disponível)
+            state = ""
+            try:
+                state = getattr(result, "state", "") or (result.get("state") if isinstance(result, dict) else "")
+            except Exception:
+                state = ""
+            if state and state not in ("STATE_CONFIRMED", "STATE_MINED"):
+                raise RuntimeError(f"Gasless tx state={state}")
+
+            # Verificação extra: saldo on-chain do token deve ir a zero
+            if self._has_balance(position.token_id):
+                raise RuntimeError("Gasless não queimou o token (saldo on-chain ainda > 0)")
+
+            log.info("  Gasless redeem OK!")
 
             return GaslessResult(
                 success=True,
