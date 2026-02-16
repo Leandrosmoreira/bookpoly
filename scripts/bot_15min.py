@@ -32,7 +32,7 @@ load_dotenv(Path(__file__).parent.parent / ".env")
 
 try:
     from py_clob_client.client import ClobClient
-    from py_clob_client.clob_types import OrderArgs, ApiCreds
+    from py_clob_client.clob_types import OrderArgs, ApiCreds, BalanceAllowanceParams, AssetType
     from py_clob_client.order_builder.constants import BUY
 except ImportError:
     print("ERRO: pip install py-clob-client")
@@ -416,13 +416,40 @@ def get_usdc_balance() -> Optional[float]:
 
 
 def _fetch_usdc_balance() -> Optional[float]:
-    """Busca saldo USDC on-chain (sem cache)."""
+    """Busca saldo USDC disponível para trade.
+
+    Fonte primária: CLOB API get_balance_allowance(COLLATERAL).
+    Na Polymarket, USDC depositado vira collateral no CTF Exchange —
+    balanceOf on-chain retorna 0. A CLOB API retorna o saldo real.
+
+    Fallback: USDC ERC-20 on-chain (para wallets com USDC não-depositado).
+    """
+    # 1. CLOB API autenticada — saldo real no exchange (retorna em raw units, 6 decimais)
+    try:
+        client = get_client()
+        params = BalanceAllowanceParams(
+            asset_type=AssetType.COLLATERAL,
+            signature_type=1,  # POLY_PROXY
+        )
+        result = client.get_balance_allowance(params)
+        if isinstance(result, dict):
+            raw_balance = result.get("balance", "0")
+            return int(raw_balance) / 10**6
+    except Exception:
+        pass
+
+    # 2. Fallback: USDC ERC-20 on-chain
+    wallet = _get_balance_wallet_address()
+    if not wallet:
+        return None
+    return _fetch_usdc_onchain(wallet)
+
+
+def _fetch_usdc_onchain(wallet: str) -> Optional[float]:
+    """Fallback: saldo USDC ERC-20 on-chain (Polygon)."""
     try:
         from web3 import Web3
     except ImportError:
-        return None
-    wallet = _get_balance_wallet_address()
-    if not wallet:
         return None
     try:
         from polygon_rpc import get_web3_with_fallback, get_polygon_rpc_list
