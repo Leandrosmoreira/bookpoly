@@ -32,7 +32,7 @@ load_dotenv(Path(__file__).parent.parent / ".env")
 
 try:
     from py_clob_client.client import ClobClient
-    from py_clob_client.clob_types import OrderArgs, ApiCreds, BalanceAllowanceParams, AssetType
+    from py_clob_client.clob_types import OrderArgs, OrderType, ApiCreds, BalanceAllowanceParams, AssetType
     from py_clob_client.order_builder.constants import BUY
 except ImportError:
     print("ERRO: pip install py-clob-client")
@@ -495,12 +495,12 @@ def place_order_with_retry(token_id: str, price: float, size: float) -> Optional
 # ==============================================================================
 
 def place_order(token_id: str, price: float, size: float) -> Optional[str]:
-    """Envia ordem LIMIT POST_ONLY."""
+    """Envia ordem LIMIT POST_ONLY (maker)."""
     try:
         client = get_client()
-        resp = client.create_and_post_order(
-            OrderArgs(token_id=token_id, price=price, size=size, side=BUY),
-        )
+        order_args = OrderArgs(token_id=token_id, price=price, size=size, side=BUY)
+        signed_order = client.create_order(order_args)
+        resp = client.post_order(signed_order, OrderType.GTC, post_only=True)
         if resp.get("success"):
             return resp.get("orderID")
         else:
@@ -718,7 +718,7 @@ def main():
             # 7a. Guardrails PRO — filtro de entrada inteligente
             gr_decision = guardrails[asset].evaluate(side, float(now))
             log_event("GUARDRAIL_DECISION", asset, ctx,
-                action=gr_decision.action.value, side=side,
+                gr_action=gr_decision.action.value, side=side,
                 risk_score=gr_decision.risk_score,
                 pump=gr_decision.pump_score,
                 stability=gr_decision.stability_score,
