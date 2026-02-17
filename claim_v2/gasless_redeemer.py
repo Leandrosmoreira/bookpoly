@@ -89,6 +89,7 @@ class GaslessRedeemer:
             private_key=pk,
             builder_config=builder_config,
             proxy_wallet_override=self.config.funder_address,
+            rpc_url=self.config.rpc_url,
         )
 
         self._initialized = True

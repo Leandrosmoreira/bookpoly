@@ -56,13 +56,8 @@ class ClaimExecutor:
 
     def initialize(self) -> bool:
         """Inicializa redeemers."""
-        # Inicializar gasless (Safe deploy)
-        if self.gasless:
-            try:
-                self.gasless.ensure_safe_deployed()
-            except Exception as e:
-                log.warning(f"Gasless init falhou: {e} — usando on-chain")
-                self.gasless = None
+        # Gasless PROXY mode nao precisa de deploy previo
+        # (diferente de SAFE mode que requer Safe deploy)
 
         # Inicializar on-chain (fallback)
         if not self.onchain.initialize():

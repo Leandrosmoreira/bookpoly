@@ -1,23 +1,25 @@
 """
-ProxyRelayClient — Wrapper que adiciona suporte PROXY ao py-builder-relayer-client.
+ProxyRelayClient -- Wrapper que adiciona suporte PROXY ao py-builder-relayer-client.
 
-O SDK Python oficial (v0.0.1) só suporta SAFE mode. Este módulo implementa o
-flow PROXY idêntico ao SDK TypeScript (@polymarket/builder-relayer-client),
+O SDK Python oficial (v0.0.1) so suporta SAFE mode. Este modulo implementa o
+flow PROXY identico ao SDK TypeScript (@polymarket/builder-relayer-client),
 reutilizando a infra HTTP, auth e polling do SDK Python.
 
-Flow PROXY:
-  1. GET /relay-payload?address={signer}&type=PROXY  → {address, nonce}
+Flow PROXY (corrigido conforme referencia qualiaenjoyer/polymarket-apis):
+  1. GET /nonce?address={proxy_wallet}&type=PROXY  -> nonce (int)
   2. Encode proxy call data (ABI encode ProxyWalletFactory.proxy(calls))
   3. Build struct hash: keccak256("rlx:" + from + to + data + fee + gasPrice + gasLimit + nonce + relayHub + relay)
   4. Sign struct hash (personal_sign via encode_defunct)
   5. POST /submit com type="PROXY"
-  6. Poll até STATE_CONFIRMED/STATE_MINED
+  6. Poll ate STATE_CONFIRMED/STATE_MINED
 
 Contratos Polygon Mainnet:
   ProxyFactory: 0xaB45c5A4B0c941a2F231C04C3f49182e1A254052
   RelayHub:     0xD216153c06E857cD7f72665E0aF1d7D82172F494
+  CTFExchange:  0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E
 
-Referência: https://github.com/Polymarket/builder-relayer-client/blob/main/src/client.ts
+Referencia: https://github.com/Polymarket/py-clob-client/issues/117
+            https://github.com/qualiaenjoyer/polymarket-apis (web3_client.py)
 """
 
 from __future__ import annotations
@@ -43,19 +45,37 @@ from py_builder_relayer_client.utils.utils import prepend_zx
 
 log = logging.getLogger("claim_v2.proxy_client")
 
-# ──────────────────────────────────────────────
+# -----------------------------------------------
 #  Constantes Polygon Mainnet (Chain ID 137)
-# ──────────────────────────────────────────────
+# -----------------------------------------------
 
 PROXY_FACTORY = "0xaB45c5A4B0c941a2F231C04C3f49182e1A254052"
 RELAY_HUB     = "0xD216153c06E857cD7f72665E0aF1d7D82172F494"
-PROXY_INIT_CODE_HASH = "0xd21df8dc65880a8606f09fe0ce3df9b8869287ab0b058be05aa9e8af6330a00b"
+
+# FIX BUG 3: Relay address HARDCODED (identico a referencia)
+# Este e o endereco do relay contract, NAO do relay worker (que muda).
+# Ref: qualiaenjoyer/polymarket-apis web3_client.py
+RELAY_ADDRESS = "0x7db63fe6d62eb73fb01f8009416f4c2bb4fbda6a"
+
+# CTFExchange -- usado para getPolyProxyWalletAddress() on-chain (FIX BUG 1)
+CTF_EXCHANGE = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E"
+
+# ABI minima para buscar proxy wallet on-chain
+EXCHANGE_ABI_PROXY = [
+    {
+        "type": "function",
+        "name": "getPolyProxyWalletAddress",
+        "inputs": [{"name": "_addr", "type": "address"}],
+        "outputs": [{"name": "", "type": "address"}],
+        "stateMutability": "view"
+    }
+]
 
 # Default gas params
 DEFAULT_GAS_PRICE = "0"
 DEFAULT_RELAYER_FEE = "0"
 
-# ── Gas Limit Calculation (idêntico ao magic-proxy-builder-example/utils/relay.ts) ──
+# -- Gas Limit Calculation (fallback estatico) --
 # Ref: https://github.com/Polymarket/magic-proxy-builder-example
 BASE_GAS_PER_TX     = 150_000
 RELAY_HUB_PADDING   = 3_450_000
@@ -66,9 +86,9 @@ MIN_EXECUTION_BUFFER = 500_000
 
 def calculate_gas_limit(transaction_count: int) -> str:
     """
-    Calcula gasLimit para o struct hash PROXY.
+    Calcula gasLimit para o struct hash PROXY (fallback estatico).
 
-    Fórmula oficial da Polymarket (magic-proxy-builder-example):
+    Formula oficial da Polymarket (magic-proxy-builder-example):
       txGas = count * 150K
       relayerWillSend = txGas + 3.45M
       maxSignable = relayerWillSend - 30K - 450K
@@ -83,17 +103,15 @@ def calculate_gas_limit(transaction_count: int) -> str:
     execution_needs = tx_gas + MIN_EXECUTION_BUFFER
     return str(min(max_signable, max(execution_needs, 3_000_000)))
 
-# Endpoint ausente no SDK Python
-GET_RELAY_PAYLOAD = "/relay-payload"
 
-# ABI mínima do ProxyWalletFactory.proxy(tuple[])
-# Cada tuple é (address to, uint8 typeCode, bytes data, uint256 value)
+# ABI minima do ProxyWalletFactory.proxy(tuple[])
+# Cada tuple e (address to, uint8 typeCode, bytes data, uint256 value)
 PROXY_FUNCTION_SELECTOR = Web3.keccak(text="proxy((address,uint8,bytes,uint256)[])")[0:4]
 
 
-# ──────────────────────────────────────────────
+# -----------------------------------------------
 #  Models
-# ──────────────────────────────────────────────
+# -----------------------------------------------
 
 class CallType(Enum):
     Invalid = 0
@@ -103,16 +121,16 @@ class CallType(Enum):
 
 @dataclass
 class ProxyTransaction:
-    """Transação individual para executar via ProxyWalletFactory."""
+    """Transacao individual para executar via ProxyWalletFactory."""
     to: str
     type_code: CallType
     data: str   # hex com ou sem 0x
     value: str
 
 
-# ──────────────────────────────────────────────
-#  Encoding — ProxyWalletFactory.proxy(calls)
-# ──────────────────────────────────────────────
+# -----------------------------------------------
+#  Encoding -- ProxyWalletFactory.proxy(calls)
+# -----------------------------------------------
 
 def encode_proxy_transaction_data(txns: List[ProxyTransaction]) -> str:
     """
@@ -142,39 +160,9 @@ def encode_proxy_transaction_data(txns: List[ProxyTransaction]) -> str:
     return prepend_zx(PROXY_FUNCTION_SELECTOR.hex() + encoded_args.hex())
 
 
-# ──────────────────────────────────────────────
-#  CREATE2 — Derivar proxy wallet
-# ──────────────────────────────────────────────
-
-def derive_proxy_wallet(signer_address: str, proxy_factory: str = PROXY_FACTORY) -> str:
-    """
-    Deriva o endereço da proxy wallet via CREATE2.
-
-    proxy_wallet = CREATE2(
-        factory = proxy_factory,
-        salt = keccak256(abi.encodePacked(signer_address)),
-        bytecodeHash = PROXY_INIT_CODE_HASH
-    )
-    """
-    signer_addr = to_checksum_address(signer_address)
-    factory_addr = to_checksum_address(proxy_factory)
-
-    # salt = keccak256(encodePacked(['address'], [signer]))
-    salt = keccak(abi_encode(["address"], [signer_addr]))
-
-    # CREATE2
-    init_code_hash = bytes.fromhex(PROXY_INIT_CODE_HASH.replace("0x", ""))
-    factory_bytes = bytes.fromhex(factory_addr.replace("0x", ""))
-
-    create2_input = b"\xff" + factory_bytes + salt + init_code_hash
-    address_hash = keccak(create2_input)
-
-    return to_checksum_address(address_hash[-20:].hex())
-
-
-# ──────────────────────────────────────────────
-#  Struct Hash — "rlx:" prefix signing
-# ──────────────────────────────────────────────
+# -----------------------------------------------
+#  Struct Hash -- "rlx:" prefix signing
+# -----------------------------------------------
 
 def _pad_32(value: int) -> bytes:
     """Converte int para bytes32 (big-endian, 32 bytes)."""
@@ -205,15 +193,17 @@ def create_proxy_struct_hash(
         pad32(gasLimit),
         pad32(nonce),
         relayHub,    // hex
-        relay        // hex do relay-payload
+        relay        // hex (HARDCODED relay address)
     ))
+
+    Identico a referencia: qualiaenjoyer/polymarket-apis helpers.py
     """
     parts = []
 
     # "rlx:" prefix (como bytes ASCII)
     parts.append(b"rlx:")
 
-    # Endereços como raw bytes (20 bytes cada)
+    # Enderecos como raw bytes (20 bytes cada)
     parts.append(bytes.fromhex(from_addr.replace("0x", "")))
     parts.append(bytes.fromhex(to_addr.replace("0x", "")))
 
@@ -226,7 +216,7 @@ def create_proxy_struct_hash(
     parts.append(_pad_32(int(gas_limit)))
     parts.append(_pad_32(int(nonce)))
 
-    # Mais endereços
+    # Mais enderecos
     parts.append(bytes.fromhex(relay_hub.replace("0x", "")))
     parts.append(bytes.fromhex(relay_address.replace("0x", "")))
 
@@ -234,9 +224,9 @@ def create_proxy_struct_hash(
     return keccak(concatenated)
 
 
-# ──────────────────────────────────────────────
+# -----------------------------------------------
 #  Assinatura
-# ──────────────────────────────────────────────
+# -----------------------------------------------
 
 def sign_proxy_struct_hash(private_key: str, struct_hash: bytes) -> str:
     """
@@ -253,11 +243,11 @@ def sign_proxy_struct_hash(private_key: str, struct_hash: bytes) -> str:
 def split_and_pack_proxy_sig(sig_hex: str) -> str:
     """
     Divide a assinatura em (r, s, v) e re-empacota.
-    Ajuste de v: mesmo padrão do SDK (v in 0,1 → +27).
+    Ajuste de v: mesmo padrao do SDK (v in 0,1 -> +27).
     """
     sig_bytes = bytes.fromhex(sig_hex.replace("0x", ""))
     if len(sig_bytes) != 65:
-        raise ValueError(f"Assinatura inválida: {len(sig_bytes)} bytes (esperado 65)")
+        raise ValueError(f"Assinatura invalida: {len(sig_bytes)} bytes (esperado 65)")
 
     r = int.from_bytes(sig_bytes[0:32], "big")
     s = int.from_bytes(sig_bytes[32:64], "big")
@@ -271,16 +261,22 @@ def split_and_pack_proxy_sig(sig_hex: str) -> str:
     return prepend_zx(packed.hex())
 
 
-# ──────────────────────────────────────────────
-#  ProxyRelayClient — Classe principal
-# ──────────────────────────────────────────────
+# -----------------------------------------------
+#  ProxyRelayClient -- Classe principal
+# -----------------------------------------------
 
 class ProxyRelayClient:
     """
-    Client que executa transações via Polymarket Relayer no modo PROXY.
+    Client que executa transacoes via Polymarket Relayer no modo PROXY.
 
     Usa a mesma infra de auth (Builder API keys) do RelayClient oficial,
-    mas implementa o flow PROXY que o SDK Python não expõe.
+    mas implementa o flow PROXY que o SDK Python nao expoe.
+
+    Corrigido conforme referencia qualiaenjoyer/polymarket-apis:
+    - Proxy address via on-chain getPolyProxyWalletAddress() ou override
+    - Nonce via GET /nonce?address=...&type=PROXY
+    - Relay address HARDCODED (nao dinamico)
+    - Gas limit via estimate_gas() * 1.3 + 100000 (com fallback estatico)
     """
 
     def __init__(
@@ -290,45 +286,134 @@ class ProxyRelayClient:
         private_key: str,
         builder_config=None,
         proxy_wallet_override: str = None,
+        rpc_url: str = "",
     ):
         self.relayer_url = relayer_url.rstrip("/")
         self.chain_id = chain_id
         self.private_key = private_key
         self.builder_config = builder_config
+        self.rpc_url = rpc_url
 
-        # Derivar endereços
+        # Derivar enderecos
         self.account = Account.from_key(private_key)
         self.signer_address = self.account.address
 
-        # Proxy wallet: usar override (Funder) se fornecido, senão derivar via CREATE2
+        # Web3 para chamadas on-chain (estimate_gas, getPolyProxyWalletAddress)
+        self.w3: Optional[Web3] = None
+        self.exchange_contract = None
+        if rpc_url:
+            try:
+                request_kwargs = {"timeout": 15}
+                try:
+                    from polygon_rpc import get_request_kwargs_for_rpc
+                    request_kwargs.update(get_request_kwargs_for_rpc(rpc_url, timeout=15))
+                except ImportError:
+                    pass
+                self.w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs=request_kwargs))
+                if self.w3.is_connected():
+                    self.exchange_contract = self.w3.eth.contract(
+                        address=Web3.to_checksum_address(CTF_EXCHANGE),
+                        abi=EXCHANGE_ABI_PROXY,
+                    )
+                    log.info(f"  Web3 conectado: {rpc_url[:40]}...")
+                else:
+                    log.warning(f"  Web3 nao conectou: {rpc_url[:40]}...")
+                    self.w3 = None
+            except Exception as e:
+                log.warning(f"  Web3 init falhou: {e}")
+                self.w3 = None
+
+        # FIX BUG 1: Proxy wallet -- usar override (Funder) ou buscar on-chain
         if proxy_wallet_override:
             self.proxy_wallet = to_checksum_address(proxy_wallet_override)
             log.info(f"  Proxy Wallet:  {self.proxy_wallet} (override / Funder)")
+        elif self.exchange_contract:
+            try:
+                self.proxy_wallet = self.get_poly_proxy_address()
+                log.info(f"  Proxy Wallet:  {self.proxy_wallet} (on-chain via Exchange)")
+            except Exception as e:
+                log.warning(f"  getPolyProxyWalletAddress falhou: {e}")
+                log.warning(f"  AVISO: Sem proxy_wallet_override e sem Web3 -- relay vai falhar!")
+                self.proxy_wallet = ""
         else:
-            self.proxy_wallet = derive_proxy_wallet(self.signer_address)
-            log.info(f"  Proxy Wallet:  {self.proxy_wallet} (derivado CREATE2)")
+            log.warning(f"  AVISO: Sem proxy_wallet_override e sem Web3 -- relay vai falhar!")
+            self.proxy_wallet = ""
 
         log.info(f"ProxyRelayClient inicializado")
-        log.info(f"  Signer:       {self.signer_address}")
+        log.info(f"  Signer:        {self.signer_address}")
         log.info(f"  ProxyFactory:  {PROXY_FACTORY}")
         log.info(f"  RelayHub:      {RELAY_HUB}")
+        log.info(f"  RelayAddress:  {RELAY_ADDRESS} (hardcoded)")
 
-    # ── API: get relay payload ──
+    # -- FIX BUG 1: Buscar proxy wallet on-chain --
 
-    def get_relay_payload(self) -> dict:
+    def get_poly_proxy_address(self) -> str:
         """
-        GET /relay-payload?address={signer}&type=PROXY
+        Busca proxy wallet via chamada on-chain ao CTFExchange.
 
-        Retorna: {"address": "0x...(relay address)", "nonce": "42"}
+        exchange.functions.getPolyProxyWalletAddress(eoa).call()
+
+        Ref: qualiaenjoyer/polymarket-apis web3_client.py
+        """
+        if not self.exchange_contract:
+            raise RuntimeError("Web3/Exchange contract nao inicializado")
+        result = self.exchange_contract.functions.getPolyProxyWalletAddress(
+            Web3.to_checksum_address(self.signer_address)
+        ).call()
+        return Web3.to_checksum_address(result)
+
+    # -- FIX BUG 2: Nonce via /nonce endpoint --
+
+    def get_relay_nonce(self) -> int:
+        """
+        GET /nonce?address={proxy_wallet}&type=PROXY
+
+        Retorna: nonce (int)
+
+        Ref: qualiaenjoyer/polymarket-apis web3_client.py _get_relay_nonce()
+        Antigo: get_relay_payload() usava /relay-payload (ERRADO -- retornava relay worker address)
         """
         import requests as req
-        url = f"{self.relayer_url}{GET_RELAY_PAYLOAD}?address={self.signer_address}&type=PROXY"
-        headers = self._generate_headers("GET", GET_RELAY_PAYLOAD) or {}
+        url = f"{self.relayer_url}/nonce?address={self.proxy_wallet}&type=PROXY"
+        headers = self._generate_headers("GET", "/nonce") or {}
         resp = req.get(url, headers=headers, timeout=15)
         resp.raise_for_status()
-        return resp.json()
+        # Resposta e texto puro com o nonce
+        nonce_text = resp.text.strip().strip('"')
+        return int(nonce_text)
 
-    # ── API: submit ──
+    # -- FIX BUG 4: Estimativa de gas on-chain --
+
+    def _estimate_gas(self, encoded_data: str) -> int:
+        """
+        Estima gas on-chain como na referencia.
+
+        estimated_gas = w3.eth.estimate_gas({from: proxy, to: factory, data: ...})
+        gas_limit = estimated_gas * 1.3 + 100000
+
+        Ref: qualiaenjoyer/polymarket-apis web3_client.py _build_proxy_relay_transaction()
+        Fallback: calculate_gas_limit() estatico se Web3 nao disponivel.
+        """
+        if not self.w3:
+            fallback = int(calculate_gas_limit(1))
+            log.info(f"  Gas estimate: usando fallback estatico {fallback} (sem Web3)")
+            return fallback
+
+        try:
+            estimated = self.w3.eth.estimate_gas({
+                "from": self.proxy_wallet,
+                "to": Web3.to_checksum_address(PROXY_FACTORY),
+                "data": encoded_data,
+            })
+            gas_limit = int(estimated * 1.3 + 100_000)
+            log.info(f"  Gas estimate: {estimated} on-chain -> {gas_limit} (x1.3 + 100K)")
+            return gas_limit
+        except Exception as e:
+            fallback = int(calculate_gas_limit(1))
+            log.warning(f"  Gas estimate falhou ({e}), usando fallback {fallback}")
+            return fallback
+
+    # -- API: submit --
 
     def _submit(self, payload: dict) -> dict:
         """POST /submit com auth headers."""
@@ -341,7 +426,7 @@ class ProxyRelayClient:
         resp.raise_for_status()
         return resp.json()
 
-    # ── API: poll transaction ──
+    # -- API: poll transaction --
 
     def poll_until_done(
         self,
@@ -349,7 +434,7 @@ class ProxyRelayClient:
         max_polls: int = 30,
         poll_freq_s: float = 2.0,
     ) -> Optional[dict]:
-        """Poll GET /transaction?id={id} até terminal state."""
+        """Poll GET /transaction?id={id} ate terminal state."""
         import requests as req
         for i in range(max_polls):
             headers = self._generate_headers("GET", "/transaction") or {}
@@ -369,10 +454,10 @@ class ProxyRelayClient:
             except Exception as e:
                 log.warning(f"  Poll {i+1}/{max_polls} erro: {e}")
             time.sleep(poll_freq_s)
-        log.warning(f"  Proxy tx {transaction_id}: timeout após {max_polls} polls")
+        log.warning(f"  Proxy tx {transaction_id}: timeout apos {max_polls} polls")
         return None
 
-    # ── Executar transações PROXY ──
+    # -- Executar transacoes PROXY --
 
     def execute(
         self,
@@ -380,7 +465,13 @@ class ProxyRelayClient:
         metadata: str = "",
     ) -> dict:
         """
-        Executa transações via Relayer no modo PROXY.
+        Executa transacoes via Relayer no modo PROXY.
+
+        Corrigido conforme referencia (4 bugs):
+        - Nonce via /nonce endpoint (nao /relay-payload)
+        - Relay address HARDCODED (nao dinamico)
+        - Gas limit via estimate_gas on-chain
+        - Proxy wallet via override ou on-chain
 
         Args:
             transactions: lista de ProxyTransaction (to, typeCode, data, value)
@@ -389,21 +480,26 @@ class ProxyRelayClient:
         Returns:
             {"transaction_id": "...", "transaction_hash": "...", "state": "..."}
         """
-        # 1. Get relay payload (nonce + relay address)
-        relay_payload = self.get_relay_payload()
-        relay_address = relay_payload.get("address", "")
-        nonce = str(relay_payload.get("nonce", "0"))
-        log.info(f"  Relay payload: nonce={nonce}, relay={relay_address[:10]}...")
+        if not self.proxy_wallet:
+            raise RuntimeError("proxy_wallet nao definido -- configure proxy_wallet_override ou rpc_url")
 
-        # 2. Encode proxy call data
+        # 1. FIX BUG 2: Get nonce via /nonce endpoint (nao /relay-payload)
+        nonce = self.get_relay_nonce()
+        log.info(f"  Nonce: {nonce} (via /nonce endpoint)")
+
+        # 2. FIX BUG 3: Relay address HARDCODED (nao dinamico)
+        relay_address = RELAY_ADDRESS
+        log.info(f"  Relay address: {relay_address} (hardcoded)")
+
+        # 3. Encode proxy call data
         encoded_data = encode_proxy_transaction_data(transactions)
         log.info(f"  Encoded data: {len(encoded_data)} chars")
 
-        # 3. Calcular gasLimit dinâmico (fórmula oficial Polymarket)
-        gas_limit = calculate_gas_limit(len(transactions))
-        log.info(f"  Gas limit: {gas_limit} (para {len(transactions)} tx)")
+        # 4. FIX BUG 4: Gas limit via estimate_gas on-chain (com fallback)
+        gas_limit = str(self._estimate_gas(encoded_data))
+        log.info(f"  Gas limit: {gas_limit}")
 
-        # 4. Create struct hash
+        # 5. Create struct hash
         struct_hash = create_proxy_struct_hash(
             from_addr=self.signer_address,
             to_addr=PROXY_FACTORY,
@@ -411,23 +507,23 @@ class ProxyRelayClient:
             tx_fee=DEFAULT_RELAYER_FEE,
             gas_price=DEFAULT_GAS_PRICE,
             gas_limit=gas_limit,
-            nonce=nonce,
+            nonce=str(nonce),
             relay_hub=RELAY_HUB,
             relay_address=relay_address,
         )
 
-        # 5. Sign
+        # 6. Sign
         signature = sign_proxy_struct_hash(self.private_key, struct_hash)
         log.info(f"  Assinatura: {signature[:20]}...")
 
-        # 6. Build request payload
+        # 7. Build request payload
         payload = {
             "type": "PROXY",
             "from": self.signer_address,
             "to": PROXY_FACTORY,
             "proxyWallet": self.proxy_wallet,
             "data": encoded_data,
-            "nonce": nonce,
+            "nonce": str(nonce),
             "signature": signature,
             "signatureParams": {
                 "gasPrice": DEFAULT_GAS_PRICE,
@@ -439,7 +535,7 @@ class ProxyRelayClient:
             "metadata": metadata,
         }
 
-        # 7. Submit
+        # 8. Submit
         log.info(f"  Submetendo tx PROXY ao relayer...")
         resp = self._submit(payload)
         tx_id = resp.get("transactionID", "") or resp.get("transaction_id", "")
@@ -447,7 +543,7 @@ class ProxyRelayClient:
 
         log.info(f"  Resposta: tx_id={tx_id}, tx_hash={tx_hash[:20] if tx_hash else '(vazio)'}...")
 
-        # 8. Poll até concluir
+        # 9. Poll ate concluir
         if tx_id:
             result = self.poll_until_done(tx_id)
             if result:
@@ -467,18 +563,18 @@ class ProxyRelayClient:
             "success": False,
         }
 
-    # ── Auth headers (reutiliza builder_config do SDK) ──
+    # -- Auth headers (reutiliza builder_config do SDK) --
 
     def _generate_headers(
         self, method: str, request_path: str, body: dict = None
     ) -> Optional[dict]:
-        """Gera headers de autenticação Builder (HMAC)."""
+        """Gera headers de autenticacao Builder (HMAC)."""
         if not self.builder_config:
             return None
         result = self.builder_config.generate_builder_headers(
             method, request_path, body
         )
-        # SDK retorna BuilderHeaderPayload object, não dict
+        # SDK retorna BuilderHeaderPayload object, nao dict
         if hasattr(result, "to_dict"):
             return result.to_dict()
         if hasattr(result, "__dict__"):
