@@ -58,6 +58,7 @@ MAX_PRICE = 0.98           # Preço máximo para entrada
 MIN_BALANCE_USDC = 6.5     # Saldo mínimo (USDC) para 6 shares @ 98%
 ORDER_FAIL_RETRY_DELAY = 2 # Segundos antes de reenviar após falha
 ORDER_FAIL_MAX_RETRIES = 2 # Tentativas de place_order antes de desistir
+MAX_RETRY_PRICE_DELTA = float(os.getenv("MAX_RETRY_PRICE_DELTA", "0.02"))  # Max centavos acima do preco original no retry
 
 # Mercados
 ASSETS = ['btc', 'eth', 'sol', 'xrp']
@@ -364,6 +365,18 @@ def get_best_ask(token_id: str) -> Optional[float]:
             asks = book.get("asks", [])
             if asks:
                 return _float_price(asks[0].get("price") or asks[0].get("p"))
+    except Exception:
+        pass
+    return None
+
+
+def fetch_book(token_id: str) -> Optional[dict]:
+    """Book completo do CLOB (bids + asks com quantidades). Para post_defense."""
+    try:
+        http = get_http()
+        r = http.get(f"{CLOB_HOST.rstrip('/')}/book", params={"token_id": token_id})
+        if r.status_code == 200:
+            return r.json()
     except Exception:
         pass
     return None
@@ -721,9 +734,11 @@ def main():
                 gr_action=gr_decision.action.value, side=side,
                 risk_score=gr_decision.risk_score,
                 pump=gr_decision.pump_score,
+                pump_thr=gr_decision.pump_threshold,
                 stability=gr_decision.stability_score,
                 time_in_band=gr_decision.time_in_band_s,
                 momentum=gr_decision.momentum_score,
+                momentum_thr=gr_decision.momentum_threshold,
                 t_remaining=time_to_expiry,
                 reason=gr_decision.reason)
             if gr_decision.action == GuardrailAction.BLOCK:
@@ -777,6 +792,14 @@ def main():
                     ctx.state = MarketState.SKIPPED
                     break
                 current_price = max(0.01, min(MAX_PRICE, round(best_ask - 0.01, 2)))
+                if current_price > price + MAX_RETRY_PRICE_DELTA:
+                    log_event("RETRY_PRICE_TOO_HIGH", asset, ctx,
+                        original_price=price, retry_price=current_price,
+                        delta=round(current_price - price, 2),
+                        max_delta=MAX_RETRY_PRICE_DELTA)
+                    ctx.trade_attempts += 1
+                    ctx.state = MarketState.SKIPPED
+                    break
                 if current_price < MIN_PRICE:
                     ctx.trade_attempts += 1
                     ctx.state = MarketState.SKIPPED
