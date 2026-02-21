@@ -49,6 +49,17 @@ class PostDefenseConfig:
     max_hedge: float = float(os.getenv("PD_MAX_HEDGE", "0.80"))
     min_shares: int = int(os.getenv("PD_MIN_SHARES", "5"))
 
+    # ── State Machine ──────────────────────────────────────────────
+    alert_confirm_ticks: int = int(os.getenv("PD_ALERT_CONFIRM_TICKS", "3"))
+    alert_cooldown_s: float = float(os.getenv("PD_ALERT_COOLDOWN_S", "5.0"))
+    panic_threshold: float = float(os.getenv("PD_PANIC_THRESHOLD", "0.70"))
+    panic_adverse_min: float = float(os.getenv("PD_PANIC_ADVERSE_MIN", "0.02"))
+    defense_exit_s: float = float(os.getenv("PD_DEFENSE_EXIT_S", "10.0"))
+
+    # ── Hedge Execution ────────────────────────────────────────────
+    hedge_cooldown_s: float = float(os.getenv("PD_HEDGE_COOLDOWN_S", "10.0"))
+    hedge_panic_markup: float = float(os.getenv("PD_HEDGE_PANIC_MARKUP", "0.01"))
+
     # ── Logging ──────────────────────────────────────────────────
     log_dir: str = os.getenv("PD_LOG_DIR", "logs")
     log_prefix: str = os.getenv("PD_LOG_PREFIX", "post_defense")

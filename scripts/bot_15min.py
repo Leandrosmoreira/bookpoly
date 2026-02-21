@@ -27,6 +27,12 @@ from typing import Optional
 import httpx
 from dotenv import load_dotenv
 from guardrails import GuardrailsPro, GuardrailAction
+from post_defense import (
+    PostDefenseEngine, PostDefenseConfig, PositionMeta,
+    DefensePhase, DefenseStateTracker, DefenseDecision,
+    evaluate_defense as pd_evaluate,
+)
+from post_defense.hedge import get_opposite_token
 
 load_dotenv(Path(__file__).parent.parent / ".env")
 
@@ -93,6 +99,7 @@ class MarketContext:
     yes_token_id: Optional[str] = None
     no_token_id: Optional[str] = None
     skip_retried: bool = False  # True após dar uma nova chance após SKIPPED no mesmo ciclo
+    defense_tracker: Optional[DefenseStateTracker] = None  # State machine pós-defesa
 
 
 # ==============================================================================
@@ -524,6 +531,23 @@ def place_order(token_id: str, price: float, size: float) -> Optional[str]:
         return None
 
 
+def place_hedge_order(token_id: str, price: float, size: float) -> Optional[str]:
+    """Envia ordem de hedge FOK (taker, fill imediato)."""
+    try:
+        client = get_client()
+        order_args = OrderArgs(token_id=token_id, price=price, size=size, side=BUY)
+        signed_order = client.create_order(order_args)
+        resp = client.post_order(signed_order, OrderType.FOK, post_only=False)
+        if resp.get("success"):
+            return resp.get("orderID")
+        else:
+            print(f"[ERRO] place_hedge_order: {resp}")
+            return None
+    except Exception as e:
+        print(f"[ERRO] place_hedge_order: {e}")
+        return None
+
+
 def cancel_order(order_id: str) -> bool:
     """Cancela uma ordem."""
     try:
@@ -572,6 +596,7 @@ def reset_context(ctx: MarketContext):
     ctx.entered_size = None
     ctx.entered_ts = None
     ctx.skip_retried = False
+    ctx.defense_tracker = None
 
 
 # ==============================================================================
@@ -624,6 +649,8 @@ def main():
     # Inicializar contextos
     contexts = {asset: MarketContext(asset=asset) for asset in ASSETS}
     guardrails = {asset: GuardrailsPro(asset=asset) for asset in ASSETS}
+    pd_config = PostDefenseConfig()
+    pd_engines = {asset: PostDefenseEngine(asset, pd_config) for asset in ASSETS}
 
     print("Iniciando loop principal... (Ctrl+C para parar)")
     print()
@@ -647,6 +674,8 @@ def main():
             yes_price = market["yes_price"]
             no_price = market["no_price"]
             guardrails[asset].update(float(now), yes_price, no_price)
+            # Feed midpoint ao engine (acumula historico, sem book = custo zero)
+            pd_engines[asset].update(float(now), yes_price, time_to_expiry)
             yes_token = market["yes_token"]
             no_token = market["no_token"]
 
@@ -664,15 +693,20 @@ def main():
                         win = ctx.entered_side == outcome_winner
                         size = ctx.entered_size if ctx.entered_size is not None else MIN_SHARES
                         pnl = (1.0 - ctx.entered_price) * size if win else -ctx.entered_price * size
+                        hedge_total = ctx.defense_tracker.total_hedge_shares if ctx.defense_tracker else 0
+                        final_phase = ctx.defense_tracker.phase.value if ctx.defense_tracker else "NONE"
                         log_event("POSITION_RESULT", asset, ctx,
                             outcome_winner=outcome_winner,
                             side=ctx.entered_side,
                             entry_price=ctx.entered_price,
                             size=size,
                             win=win,
-                            pnl=round(pnl, 2))
+                            pnl=round(pnl, 2),
+                            hedge_shares=hedge_total,
+                            defense_phase=final_phase)
                 reset_context(ctx)
                 guardrails[asset].reset()
+                pd_engines[asset].clear_position()
                 ctx.cycle_end_ts = end_ts
                 log_event("NEW_CYCLE", asset, ctx, end_ts=end_ts, title=market["title"])
 
@@ -705,11 +739,103 @@ def main():
                     ctx.skip_retried = True
                     log_event("RE_ENTRY_AFTER_SKIP", asset, ctx, time_to_expiry=time_to_expiry, yes_price=round(yes_price, 2), no_price=round(no_price, 2))
 
-            # 6. Já em posição (FILLED) ou ciclo encerrado?
-            if ctx.state in (MarketState.HOLDING, MarketState.DONE, MarketState.SKIPPED):
+            # 6. Ciclo encerrado?
+            if ctx.state in (MarketState.DONE, MarketState.SKIPPED):
                 continue
+
+            # 6a. HOLDING — defesa pos-entrada
+            if ctx.state == MarketState.HOLDING:
+                if pd_config.enabled and ctx.defense_tracker is not None:
+                    try:
+                        # Buscar book do token onde estamos posicionados
+                        entered_token = ctx.yes_token_id if ctx.entered_side == "YES" else ctx.no_token_id
+                        book_json = fetch_book(entered_token) if entered_token else None
+
+                        # Update engine com book (grava JSONL automaticamente)
+                        snap = pd_engines[asset].update(
+                            float(now), yes_price, time_to_expiry, book_json
+                        )
+
+                        # Best ask do lado oposto (para preco de hedge)
+                        opp_token, _ = get_opposite_token(
+                            ctx.entered_side, ctx.yes_token_id, ctx.no_token_id
+                        )
+                        best_ask_opp = get_best_ask(opp_token) if opp_token else None
+
+                        # Avaliar defesa
+                        decision = pd_evaluate(
+                            tracker=ctx.defense_tracker,
+                            snap=snap,
+                            entered_side=ctx.entered_side,
+                            entered_shares=ctx.entered_size or MIN_SHARES,
+                            yes_token_id=ctx.yes_token_id,
+                            no_token_id=ctx.no_token_id,
+                            best_ask_opposite=best_ask_opp,
+                            config=pd_config,
+                            now_ts=float(now),
+                        )
+
+                        # Log transicao de fase
+                        if decision.phase_changed:
+                            log_event("DEFENSE_PHASE", asset, ctx,
+                                prev=decision.prev_phase.value,
+                                new=decision.phase.value,
+                                reason=decision.reason,
+                                severity=round(decision.severity, 4),
+                                rpi=round(decision.rpi, 4),
+                                adverse_move=decision.adverse_move)
+
+                        # Executar hedge se necessario
+                        if decision.should_hedge and decision.hedge_shares > 0:
+                            # Verificar saldo antes de hedgear
+                            balance = get_usdc_balance()
+                            hedge_cost = decision.hedge_price * decision.hedge_shares
+                            if balance is not None and balance < hedge_cost:
+                                log_event("HEDGE_NO_BALANCE", asset, ctx,
+                                    balance=round(balance, 2), needed=round(hedge_cost, 2))
+                            else:
+                                log_event("HEDGE_PLACING", asset, ctx,
+                                    phase=decision.phase.value,
+                                    shares=decision.hedge_shares,
+                                    price=decision.hedge_price,
+                                    side=decision.hedge_side,
+                                    severity=round(decision.severity, 4))
+
+                                hedge_id = place_hedge_order(
+                                    decision.hedge_token_id,
+                                    decision.hedge_price,
+                                    decision.hedge_shares,
+                                )
+
+                                if hedge_id:
+                                    # FOK: fill e imediato, verificar resultado
+                                    filled = check_order_filled(hedge_id)
+                                    if filled:
+                                        ctx.defense_tracker.total_hedge_shares += decision.hedge_shares
+                                        ctx.defense_tracker.last_hedge_ts = float(now)
+                                        ctx.defense_tracker.hedge_order_id = hedge_id
+                                        log_event("HEDGE_FILLED", asset, ctx,
+                                            phase=decision.phase.value,
+                                            shares=decision.hedge_shares,
+                                            price=decision.hedge_price,
+                                            total_hedged=ctx.defense_tracker.total_hedge_shares)
+                                    else:
+                                        log_event("HEDGE_NOT_FILLED", asset, ctx,
+                                            phase=decision.phase.value,
+                                            shares=decision.hedge_shares,
+                                            reason="FOK_not_matched")
+                                else:
+                                    log_event("HEDGE_FAILED", asset, ctx,
+                                        phase=decision.phase.value,
+                                        reason="order_rejected")
+
+                    except Exception as e:
+                        print(f"[ERRO] post_defense({asset}): {e}")
+
+                continue  # HOLDING nao entra na logica de entrada
+
             if ctx.trade_attempts >= 1:
-                continue  # já deu fill neste ciclo — não reenvia
+                continue  # ja deu fill neste ciclo — nao reenvia
 
             # 7. Verificar condição 95%-98%
             side, token_id, price = None, None, None
@@ -778,6 +904,24 @@ def main():
                     ctx.entered_ts = now
                     ctx.order_id = None
                     log_event("FILLED", asset, ctx, side=side, price=current_price)
+                    # Iniciar tracking de defesa pos-entrada
+                    if pd_config.enabled:
+                        vol_s, vol_l, z_v = pd_engines[asset].snapshot_regime()
+                        meta = PositionMeta(
+                            market_id=asset,
+                            side=side,
+                            entry_price=current_price,
+                            entry_time_s=float(now),
+                            position_shares=MIN_SHARES,
+                            vol_entry_short=vol_s,
+                            vol_entry_long=vol_l,
+                            z_vol_entry=z_v,
+                        )
+                        pd_engines[asset].start_position(meta)
+                        ctx.defense_tracker = DefenseStateTracker()
+                        log_event("DEFENSE_STARTED", asset, ctx,
+                            vol_entry_short=round(vol_s, 6),
+                            vol_entry_long=round(vol_l, 6))
                     break
                 cancel_order(order_id)
                 ctx.order_id = None

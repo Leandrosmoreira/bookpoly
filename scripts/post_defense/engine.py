@@ -281,7 +281,12 @@ class PostDefenseEngine:
             list(self.rpi_history), cfg.rpi_window_s, cfg.rpi_k,
         )
 
-        severity = calc_severity(rpi, rpi_threshold)
+        # Warmup guard: severity so ativa apos 10 ticks com posicao
+        # (evita falso positivo nos primeiros segundos apos o fill)
+        if has_position and len(self.dir_velocity_history) < 10:
+            severity = 0.0
+        else:
+            severity = calc_severity(rpi, rpi_threshold)
 
         # ── 8. Monta TickSnapshot ────────────────────────────────
         snap = TickSnapshot(

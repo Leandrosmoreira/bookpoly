@@ -1,12 +1,15 @@
 """
-Post-Defense: Sistema de defesa pós-entrada para bot_15min.
+Post-Defense: Sistema de defesa pos-entrada para bot_15min.
 
-Indicadores de reversão calculados a cada 1s durante HOLDING.
+Indicadores de reversao + state machine + hedge execution.
 """
 
 from .config import PostDefenseConfig
 from .types import PositionMeta, BookSnapshot, TickSnapshot
 from .engine import PostDefenseEngine
+from .state_machine import DefensePhase, DefenseStateTracker
+from .decision import DefenseDecision, evaluate_defense
+from .hedge import calc_hedge_shares, calc_hedge_price, get_opposite_token
 
 __all__ = [
     "PostDefenseConfig",
@@ -14,4 +17,11 @@ __all__ = [
     "BookSnapshot",
     "TickSnapshot",
     "PostDefenseEngine",
+    "DefensePhase",
+    "DefenseStateTracker",
+    "DefenseDecision",
+    "evaluate_defense",
+    "calc_hedge_shares",
+    "calc_hedge_price",
+    "get_opposite_token",
 ]
