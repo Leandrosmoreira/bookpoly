@@ -15,7 +15,6 @@ USO:
 
 import json
 import os
-import re
 import signal
 import sys
 import time
@@ -70,9 +69,6 @@ MAX_RETRY_PRICE_DELTA = float(os.getenv("MAX_RETRY_PRICE_DELTA", "0.02"))  # Max
 # Mercados
 ASSETS = ['btc', 'eth', 'sol', 'xrp']
 
-# Symbols Binance para preço spot
-SPOT_SYMBOLS = {'btc': 'BTCUSDT', 'eth': 'ETHUSDT', 'sol': 'SOLUSDT', 'xrp': 'XRPUSDT'}
-
 # Diretório de logs
 LOGS_DIR = Path(__file__).parent.parent / "logs"
 
@@ -104,8 +100,8 @@ class MarketContext:
     no_token_id: Optional[str] = None
     skip_retried: bool = False  # True após dar uma nova chance após SKIPPED no mesmo ciclo
     defense_tracker: Optional[DefenseStateTracker] = None  # State machine pós-defesa
-    price_to_beat: Optional[float] = None  # Preço referência do ciclo (ex: $67,817.02)
-    spot_price: Optional[float] = None     # Preço spot atual do ativo (Binance)
+    yes_price: Optional[float] = None  # Probabilidade YES atual (CLOB)
+    no_price: Optional[float] = None   # Probabilidade NO atual (CLOB)
 
 
 # ==============================================================================
@@ -183,8 +179,8 @@ def log_event(action: str, asset: str, ctx: MarketContext, **extra):
         "state": ctx.state.value,
         "action": action,
         "order_id": ctx.order_id,
-        "price_to_beat": ctx.price_to_beat,
-        "spot_price": ctx.spot_price,
+        "yes_price": ctx.yes_price,
+        "no_price": ctx.no_price,
         **extra,
     }
 
@@ -196,24 +192,29 @@ def log_event(action: str, asset: str, ctx: MarketContext, **extra):
     time_str = datetime.now().strftime("%H:%M:%S")
     state_str = ctx.state.value.ljust(12)
 
-    # Price to beat e spot price
-    ptb = ctx.price_to_beat
-    spot = ctx.spot_price
-    ptb_str = f"ptb=${ptb:,.2f}" if ptb else "ptb=--"
-    spot_str = f"spot=${spot:,.2f}" if spot else "spot=--"
+    # Probabilidades CLOB (sempre visíveis)
+    yp = ctx.yes_price
+    np_ = ctx.no_price
+    clob_str = f"yes={yp:.2f} no={np_:.2f}" if yp is not None and np_ is not None else ""
 
     # Status P&L em tempo real (só durante HOLDING com posição ativa)
-    status_str = ""
-    if ctx.state == MarketState.HOLDING and ctx.entered_side and ctx.entered_price is not None:
-        status, pnl = calc_live_status(
-            ctx.entered_side, ctx.spot_price, ctx.price_to_beat,
-            ctx.entered_price, ctx.entered_size or MIN_SHARES
+    pos_str = ""
+    if (ctx.state == MarketState.HOLDING
+            and ctx.entered_side and ctx.entered_price is not None
+            and yp is not None and np_ is not None):
+        side_now, winning, pnl = calc_clob_pnl(
+            ctx.entered_side, ctx.entered_price,
+            yp, np_, ctx.entered_size or MIN_SHARES
         )
-        if status is not None:
-            emoji = "\u2705" if status == "WIN" else "\u274c"
-            status_str = f" {emoji}{status} ${pnl:+.2f}"
+        emoji = "\u2705" if winning else "\u274c"
+        label = "WINNING" if winning else "LOSING"
+        pos_str = f"{ctx.entered_side}@{ctx.entered_price:.2f} now={side_now:.2f} {emoji}{label} ${pnl:+.2f}"
 
-    print(f"[{time_str}] {asset.upper().ljust(4)} | {state_str} | {ptb_str} {spot_str}{status_str} | {action} {extra if extra else ''}")
+    # Montar linha final
+    if pos_str:
+        print(f"[{time_str}] {asset.upper().ljust(4)} | {state_str} | {pos_str} | {clob_str} | {action} {extra if extra else ''}")
+    else:
+        print(f"[{time_str}] {asset.upper().ljust(4)} | {state_str} | {clob_str} | {action} {extra if extra else ''}")
 
 
 # ==============================================================================
@@ -415,46 +416,18 @@ def fetch_book(token_id: str) -> Optional[dict]:
     return None
 
 
-def parse_price_to_beat(title: str) -> Optional[float]:
-    """Extrai o price-to-beat do título do mercado.
-    Ex: 'Will BTC be above $67,817.02 at 3AM ET?' → 67817.02
+def calc_clob_pnl(entered_side: str, entered_price: float,
+                  yes_price: float, no_price: float, shares: float) -> tuple:
+    """P&L em tempo real baseado na probabilidade CLOB do lado posicionado.
+    Retorna (side_now_price, is_winning, potential_pnl).
     """
-    m = re.search(r'\$([\d,]+\.?\d*)', title)
-    return float(m.group(1).replace(',', '')) if m else None
-
-
-def fetch_spot_price(asset: str) -> Optional[float]:
-    """Busca preço spot do ativo na Binance (API pública, sem auth)."""
-    symbol = SPOT_SYMBOLS.get(asset)
-    if not symbol:
-        return None
-    try:
-        http = get_http()
-        r = http.get(f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}", timeout=2)
-        if r.status_code == 200:
-            return float(r.json()["price"])
-    except Exception:
-        pass
-    return None
-
-
-def calc_live_status(side: str, spot_price: Optional[float], price_to_beat: Optional[float],
-                     entry_price: float, shares: float) -> tuple:
-    """Calcula status P&L em tempo real durante HOLDING.
-    Retorna (status_str, pnl) — ex: ('WIN', 0.30) ou ('LOSS', -5.70).
-    """
-    if spot_price is None or price_to_beat is None:
-        return None, None
-    if side == "YES":
-        winning = spot_price > price_to_beat
-    else:  # NO
-        winning = spot_price < price_to_beat
+    side_now = yes_price if entered_side == "YES" else no_price
+    winning = side_now > entered_price
     if winning:
-        pnl = round((1.0 - entry_price) * shares, 2)
-        return "WIN", pnl
+        pnl = round((1.0 - entered_price) * shares, 2)
     else:
-        pnl = round(-entry_price * shares, 2)
-        return "LOSS", pnl
+        pnl = round(-entered_price * shares, 2)
+    return side_now, winning, pnl
 
 
 def get_outcome_prices(market: dict) -> tuple:
@@ -665,8 +638,8 @@ def reset_context(ctx: MarketContext):
     ctx.entered_ts = None
     ctx.skip_retried = False
     ctx.defense_tracker = None
-    ctx.price_to_beat = None
-    ctx.spot_price = None
+    ctx.yes_price = None
+    ctx.no_price = None
 
 
 # ==============================================================================
@@ -753,10 +726,9 @@ def main():
             ctx.yes_token_id = yes_token
             ctx.no_token_id = no_token
 
-            # Atualizar spot price (Binance) e price_to_beat (título)
-            ctx.spot_price = fetch_spot_price(asset)
-            if ctx.price_to_beat is None:
-                ctx.price_to_beat = parse_price_to_beat(market.get("title", ""))
+            # Atualizar probabilidades CLOB no contexto (para log_event)
+            ctx.yes_price = round(yes_price, 4)
+            ctx.no_price = round(no_price, 4)
 
             # 2. Detectar novo ciclo
             if ctx.cycle_end_ts != end_ts:
@@ -770,7 +742,9 @@ def main():
                         pnl = (1.0 - ctx.entered_price) * size if win else -ctx.entered_price * size
                         hedge_total = ctx.defense_tracker.total_hedge_shares if ctx.defense_tracker else 0
                         final_phase = ctx.defense_tracker.phase.value if ctx.defense_tracker else "NONE"
-                        spot_delta = round(ctx.spot_price - ctx.price_to_beat, 2) if ctx.spot_price and ctx.price_to_beat else None
+                        entered_side_price_final = round(
+                            yes_price if ctx.entered_side == "YES" else no_price, 4
+                        )
                         log_event("POSITION_RESULT", asset, ctx,
                             outcome_winner=outcome_winner,
                             side=ctx.entered_side,
@@ -780,13 +754,11 @@ def main():
                             pnl=round(pnl, 2),
                             hedge_shares=hedge_total,
                             defense_phase=final_phase,
-                            spot_price_final=ctx.spot_price,
-                            spot_delta=spot_delta)
+                            entered_side_price_final=entered_side_price_final)
                 reset_context(ctx)
                 guardrails[asset].reset()
                 pd_engines[asset].clear_position()
                 ctx.cycle_end_ts = end_ts
-                ctx.price_to_beat = parse_price_to_beat(market.get("title", ""))
                 log_event("NEW_CYCLE", asset, ctx, end_ts=end_ts, title=market["title"])
 
             # 3. Já expirou?
