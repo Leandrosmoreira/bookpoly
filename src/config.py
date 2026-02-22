@@ -18,6 +18,12 @@ class Config:
     coins: list = field(default_factory=list)
     # Moedas para gravar também no mercado 5min (ex.: COINS_5M=btc)
     coins_5m: list = field(default_factory=list)
+    # Moedas para gravar no mercado 1h (ex.: COINS_1H=btc,eth,sol,xrp)
+    coins_1h: list = field(default_factory=list)
+    # Moedas para gravar no mercado 4h (ex.: COINS_4H=btc,eth,sol,xrp)
+    coins_4h: list = field(default_factory=list)
+    # Moedas para gravar no mercado diário (ex.: COINS_1D=btc,eth,sol,xrp,hype)
+    coins_1d: list = field(default_factory=list)
 
     def __post_init__(self):
         if not self.coins:
@@ -26,3 +32,12 @@ class Config:
         if not self.coins_5m:
             raw_5m = os.getenv("COINS_5M", "btc")
             self.coins_5m = [c.strip().lower() for c in raw_5m.split(",")] if raw_5m else []
+        if not self.coins_1h:
+            raw_1h = os.getenv("COINS_1H", "")
+            self.coins_1h = [c.strip().lower() for c in raw_1h.split(",")] if raw_1h else []
+        if not self.coins_4h:
+            raw_4h = os.getenv("COINS_4H", "")
+            self.coins_4h = [c.strip().lower() for c in raw_4h.split(",")] if raw_4h else []
+        if not self.coins_1d:
+            raw_1d = os.getenv("COINS_1D", "")
+            self.coins_1d = [c.strip().lower() for c in raw_1d.split(",")] if raw_1d else []

@@ -104,3 +104,32 @@ sudo journalctl -u bookpoly-recorder -f -n 100
 | Reiniciar serviço | `sudo systemctl restart bookpoly-recorder` |
 
 Se em algum passo aparecer 404 ou "Market not found" só para BTC5m, o problema é o slug do mercado 5min na API; o resto do código está consistente com o modelo 15m.
+
+---
+
+## Mercados 1h (COINS_1H)
+
+O recorder também grava os mercados **Up or Down 1 hora** (Polymarket: ex. "Bitcoin Up or Down - February 22, 2-3PM ET") quando `COINS_1H` está definido (ex.: `COINS_1H=btc,eth,sol,xrp` no `bookpoly-recorder.service`).
+
+- **Arquivos:** `data/raw/books/{BTC,ETH,SOL,XRP}1h_YYYY-MM-DD.jsonl`
+- **Slug Gamma (1h):** formato legado em ET, ex.: `bitcoin-up-or-down-february-22-2pm-et` (nome completo do ativo + data/hora em America/New_York)
+- **Testar:** rodar o recorder com `COINS_1H=btc` e verificar `Discovered BTC1h: bitcoin-up-or-down-...` e `ls data/raw/books/BTC1h_*.jsonl`
+- Se a API devolver 404 para 1h, o slug na Gamma pode ser outro; ajustar `_slug_1h` em `src/market_discovery.py`.
+
+---
+
+## Mercados 4h (COINS_4H)
+
+Mercados **Up or Down 4 horas** (ex. "Bitcoin Up or Down - February 22, 12:00PM-4:00PM ET"). Slug Gamma: `{coin}-updown-4h-{window_ts}` (timestamp UTC).
+
+- **Arquivos:** `data/raw/books/{BTC,ETH,SOL,XRP}4h_YYYY-MM-DD.jsonl`
+- **Variável:** `COINS_4H=btc,eth,sol,xrp` no `bookpoly-recorder.service`
+
+---
+
+## Mercados diários 1d (COINS_1D)
+
+Mercados **Up or Down on {date}** (ex. "Bitcoin Up or Down on February 23?"), resolvem ao meio-dia ET. Slug Gamma: `{nome}-up-or-down-on-{month}-{day}` (data de resolução em ET).
+
+- **Arquivos:** `data/raw/books/{BTC,ETH,SOL,XRP,HYPE}1d_YYYY-MM-DD.jsonl`
+- **Variável:** `COINS_1D=btc,eth,sol,xrp,hype` (hype = Hyperliquid)

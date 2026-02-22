@@ -7,6 +7,10 @@ Type=simple
 User=root
 WorkingDirectory=/root/bookpoly
 Environment="PATH=/root/bookpoly/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="COINS_5M=btc,eth,sol,xrp"
+Environment="COINS_1H=btc,eth,sol,xrp"
+Environment="COINS_4H=btc,eth,sol,xrp"
+Environment="COINS_1D=btc,eth,sol,xrp,hype"
 ExecStart=/root/bookpoly/venv/bin/python /root/bookpoly/src/main.py
 Restart=always
 RestartSec=10

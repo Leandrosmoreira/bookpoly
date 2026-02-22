@@ -15,7 +15,7 @@ from market_discovery import MarketDiscovery, current_window_ts
 from recorder import build_row, build_error_row
 from writer import Writer
 
-INTERVALS = ("15m", "5m")  # intervals we record (5m only if COINS_5M set)
+INTERVALS = ("15m", "5m", "1h", "4h", "1d")  # 4h if COINS_4H; 1d if COINS_1D
 
 logging.basicConfig(
     level=logging.INFO,
@@ -36,7 +36,10 @@ def _signal_handler():
 async def run():
     config = Config()
     coins_5m = getattr(config, "coins_5m", []) or []
-    log.info(f"Config: coins={config.coins}, coins_5m={coins_5m}, depth={config.depth_levels}, hz={config.poll_hz}")
+    coins_1h = getattr(config, "coins_1h", []) or []
+    coins_4h = getattr(config, "coins_4h", []) or []
+    coins_1d = getattr(config, "coins_1d", []) or []
+    log.info(f"Config: coins={config.coins}, coins_5m={coins_5m}, coins_1h={coins_1h}, coins_4h={coins_4h}, coins_1d={coins_1d}, depth={config.depth_levels}, hz={config.poll_hz}")
 
     writer = Writer(config.out_dir)
     client = ClobClient(config)

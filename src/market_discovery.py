@@ -2,30 +2,96 @@ import json
 import time
 import asyncio
 import logging
+from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
+
 import aiohttp
 from config import Config
 
 log = logging.getLogger(__name__)
 
-WINDOW_SECONDS_15M = 900   # 15 minutes
+WINDOW_SECONDS_15M = 900    # 15 minutes
 WINDOW_SECONDS_5M = 300    # 5 minutes
+WINDOW_SECONDS_1H = 3600   # 1 hour
+WINDOW_SECONDS_4H = 14400  # 4 hours
+
+# Nome completo do ativo para o slug 1h (Polymarket usa ex.: bitcoin-up-or-down-february-22-2pm-et)
+COIN_FULL_NAME_1H = {"btc": "bitcoin", "eth": "ethereum", "sol": "solana", "xrp": "xrp"}
+# Nome completo para o slug 1d (ex.: bitcoin-up-or-down-on-february-23), inclui hype
+COIN_FULL_NAME_1D = {"btc": "bitcoin", "eth": "ethereum", "sol": "solana", "xrp": "xrp", "hype": "hyperliquid"}
+
+ET = ZoneInfo("America/New_York")
 
 
 def current_window_ts(server_time_s: float, interval: str = "15m") -> int:
-    """Round down to the nearest window boundary (15m or 5m)."""
-    sec = WINDOW_SECONDS_5M if interval == "5m" else WINDOW_SECONDS_15M
+    """Round down to the nearest window boundary (15m, 5m, 1h, 4h or 1d)."""
+    if interval == "1d":
+        # Mercado diário: resolve ao meio-dia ET; "atual" = hoje se antes do meio-dia ET, senão amanhã
+        dt_et = datetime.fromtimestamp(server_time_s, tz=ET)
+        if dt_et.hour < 12:
+            resolution_date = dt_et.date()
+        else:
+            resolution_date = (dt_et + timedelta(days=1)).date()
+        noon_et = datetime(resolution_date.year, resolution_date.month, resolution_date.day, 12, 0, 0, tzinfo=ET)
+        return int(noon_et.timestamp())
+    if interval == "4h":
+        # Mercados 4h da Polymarket usam janelas em ET (12PM, 4PM, 8PM, 12AM, 4AM, 8AM ET)
+        dt_et = datetime.fromtimestamp(server_time_s, tz=ET)
+        window_hour = (dt_et.hour // 4) * 4
+        window_start_et = datetime(
+            dt_et.year, dt_et.month, dt_et.day, window_hour, 0, 0, tzinfo=ET
+        )
+        return int(window_start_et.timestamp())
+    if interval == "5m":
+        sec = WINDOW_SECONDS_5M
+    elif interval == "1h":
+        sec = WINDOW_SECONDS_1H
+    else:
+        sec = WINDOW_SECONDS_15M
     return int(server_time_s // sec) * sec
 
 
+def _slug_1h(coin: str, window_ts: int) -> str:
+    """Build Gamma slug for 1h market: e.g. bitcoin-up-or-down-february-22-2pm-et."""
+    name = COIN_FULL_NAME_1H.get(coin.lower(), coin.lower())
+    dt_utc = datetime.fromtimestamp(window_ts, tz=timezone.utc)
+    dt_et = dt_utc.astimezone(ET)
+    month = dt_et.strftime("%B").lower()
+    day = dt_et.day
+    hour_12 = dt_et.hour % 12 or 12
+    am_pm = "am" if dt_et.hour < 12 else "pm"
+    return f"{name}-up-or-down-{month}-{day}-{hour_12}{am_pm}-et"
+
+
+def _slug_1d(coin: str, window_ts: int) -> str:
+    """Build Gamma slug for daily market: e.g. bitcoin-up-or-down-on-february-23."""
+    name = COIN_FULL_NAME_1D.get(coin.lower(), coin.lower())
+    dt_utc = datetime.fromtimestamp(window_ts, tz=timezone.utc)
+    dt_et = dt_utc.astimezone(ET)
+    month = dt_et.strftime("%B").lower()
+    day = dt_et.day
+    return f"{name}-up-or-down-on-{month}-{day}"
+
+
 def make_slug(coin: str, window_ts: int, interval: str = "15m") -> str:
-    """Build the Gamma API slug for an updown market (15m or 5m)."""
-    suffix = "5m" if interval == "5m" else "15m"
+    """Build the Gamma API slug for an updown market (15m, 5m, 1h, 4h or 1d)."""
+    if interval == "1h":
+        return _slug_1h(coin, window_ts)
+    if interval == "1d":
+        return _slug_1d(coin, window_ts)
+    if interval == "4h":
+        return f"{coin.lower()}-updown-4h-{window_ts}"
+    if interval == "5m":
+        suffix = "5m"
+    else:
+        suffix = "15m"
     return f"{coin.lower()}-updown-{suffix}-{window_ts}"
 
 
 def _market_label(coin: str, interval: str) -> str:
-    """e.g. BTC15m, BTC5m."""
-    suffix = "5m" if interval == "5m" else "15m"
+    """e.g. BTC15m, BTC5m, BTC1h, BTC4h, BTC1d, HYPE1d."""
+    suffix_map = {"5m": "5m", "1h": "1h", "4h": "4h", "1d": "1d"}
+    suffix = suffix_map.get(interval, "15m")
     return f"{coin.upper()}{suffix}"
 
 
@@ -35,6 +101,9 @@ class MarketDiscovery:
         self.timeout = aiohttp.ClientTimeout(total=config.request_timeout)
         self.coins = config.coins
         self.coins_5m = getattr(config, "coins_5m", []) or []
+        self.coins_1h = getattr(config, "coins_1h", []) or []
+        self.coins_4h = getattr(config, "coins_4h", []) or []
+        self.coins_1d = getattr(config, "coins_1d", []) or []
         self.max_retries = config.max_retries
         # Cache: (coin, interval) -> {condition_id, yes_token, no_token, window_ts, market_label, ...}
         self._cache: dict[tuple[str, str], dict] = {}
@@ -42,6 +111,12 @@ class MarketDiscovery:
         self._specs: list[tuple[str, str]] = [(c, "15m") for c in self.coins]
         if self.coins_5m:
             self._specs += [(c, "5m") for c in self.coins_5m]
+        if self.coins_1h:
+            self._specs += [(c, "1h") for c in self.coins_1h]
+        if self.coins_4h:
+            self._specs += [(c, "4h") for c in self.coins_4h]
+        if self.coins_1d:
+            self._specs += [(c, "1d") for c in self.coins_1d]
 
     def _market_label(self, coin: str, interval: str) -> str:
         return _market_label(coin, interval)
