@@ -269,7 +269,11 @@ class GuardrailsPro:
         risk = max(0.0, min(1.0, risk))
 
         # ── Decisao ──
-        if risk >= cfg.block_threshold:
+        # Hard block: pump extremo + mercado instavel (pump trap protection)
+        if pump >= 0.60 and stability <= 0.30:
+            action = GuardrailAction.BLOCK
+            reason = f"BLOCK:pump_extreme({pump:.2f})+unstable({stability:.2f})"
+        elif risk >= cfg.block_threshold:
             action = GuardrailAction.BLOCK
             reason = self._reason(pump, stability, tib_s, momentum)
         elif risk >= cfg.caution_threshold:

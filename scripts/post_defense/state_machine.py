@@ -3,11 +3,15 @@ State machine de defesa pos-entrada.
 
 5 fases: NORMAL -> ALERT -> DEFENSE -> PANIC -> EXIT
 Transicoes baseadas em severity, tempo e adverse_move.
+
+ALERT -> DEFENSE usa janela movel (2 de 5 ticks com severity > 0)
+em vez de ticks consecutivos (que falhava porque severity e transiente).
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections import deque
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
 
@@ -29,7 +33,8 @@ class DefenseStateTracker:
 
     phase: DefensePhase = DefensePhase.NORMAL
     phase_entered_ts: float = 0.0        # Quando entrou na fase atual
-    alert_ticks: int = 0                 # Ticks consecutivos com severity > 0
+    alert_ticks: int = 0                 # Legacy (mantido para compatibilidade de log)
+    severity_window: deque = field(default_factory=lambda: deque(maxlen=5))  # Janela movel de severity
     severity_zero_since: float = 0.0     # Desde quando severity == 0 (para cooldown)
     last_hedge_ts: float = 0.0           # Timestamp do ultimo hedge
     total_hedge_shares: int = 0          # Total de shares hedgeadas neste ciclo
@@ -41,6 +46,7 @@ class DefenseStateTracker:
         self.phase = DefensePhase.NORMAL
         self.phase_entered_ts = 0.0
         self.alert_ticks = 0
+        self.severity_window.clear()
         self.severity_zero_since = 0.0
         self.last_hedge_ts = 0.0
         self.total_hedge_shares = 0
@@ -73,33 +79,45 @@ def evaluate_transition(
     if phase == DefensePhase.NORMAL:
         if sev > 0:
             tracker.alert_ticks = 1
+            tracker.severity_window.clear()
+            tracker.severity_window.append(True)
             tracker.phase = DefensePhase.ALERT
             tracker.phase_entered_ts = now_ts
             return DefensePhase.ALERT, f"severity={sev:.4f}"
         return DefensePhase.NORMAL, ""
 
-    # ── ALERT ────────────────────────────────────────────────────
+    # ── ALERT (janela movel: escala se M de N ticks com severity > 0) ──
     if phase == DefensePhase.ALERT:
+        # Registrar tick na janela movel
+        tracker.severity_window.append(sev > 0)
         if sev > 0:
             tracker.alert_ticks += 1
-            # Confirmacao: N ticks consecutivos
-            if tracker.alert_ticks >= config.alert_confirm_ticks and snap.allow_reversal:
-                tracker.phase = DefensePhase.DEFENSE
-                tracker.phase_entered_ts = now_ts
-                return DefensePhase.DEFENSE, (
-                    f"confirmed_{tracker.alert_ticks}ticks "
-                    f"sev={sev:.4f} rpi={snap.rpi:.4f}"
-                )
-            return DefensePhase.ALERT, ""
-        else:
-            # Severity voltou a 0 — cooldown antes de voltar a NORMAL
+
+        # Contar hits na janela
+        hits = sum(1 for s in tracker.severity_window if s)
+        window_size = config.alert_window_size
+        min_hits = config.alert_min_hits
+
+        # Confirmacao: M de N ticks com severity > 0
+        if hits >= min_hits and snap.allow_reversal:
+            tracker.phase = DefensePhase.DEFENSE
+            tracker.phase_entered_ts = now_ts
+            return DefensePhase.DEFENSE, (
+                f"confirmed_{hits}of{len(tracker.severity_window)}ticks "
+                f"sev={sev:.4f} rpi={snap.rpi:.4f}"
+            )
+
+        # Cooldown: voltar a NORMAL se NENHUM hit na janela E tempo suficiente
+        if hits == 0:
             elapsed = now_ts - tracker.severity_zero_since if tracker.severity_zero_since > 0 else 0
             if elapsed >= config.alert_cooldown_s:
                 tracker.alert_ticks = 0
+                tracker.severity_window.clear()
                 tracker.phase = DefensePhase.NORMAL
                 tracker.phase_entered_ts = now_ts
                 return DefensePhase.NORMAL, f"alert_cooldown_{elapsed:.0f}s"
-            return DefensePhase.ALERT, ""
+
+        return DefensePhase.ALERT, ""
 
     # ── DEFENSE ──────────────────────────────────────────────────
     if phase == DefensePhase.DEFENSE:
@@ -117,6 +135,7 @@ def evaluate_transition(
         if sev == 0:
             elapsed = now_ts - tracker.severity_zero_since if tracker.severity_zero_since > 0 else 0
             if elapsed >= config.defense_exit_s:
+                tracker.severity_window.clear()
                 tracker.phase = DefensePhase.NORMAL
                 tracker.phase_entered_ts = now_ts
                 return DefensePhase.NORMAL, f"defense_exit_{elapsed:.0f}s"

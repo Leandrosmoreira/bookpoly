@@ -50,7 +50,9 @@ class PostDefenseConfig:
     min_shares: int = int(os.getenv("PD_MIN_SHARES", "5"))
 
     # ── State Machine ──────────────────────────────────────────────
-    alert_confirm_ticks: int = int(os.getenv("PD_ALERT_CONFIRM_TICKS", "3"))
+    alert_confirm_ticks: int = int(os.getenv("PD_ALERT_CONFIRM_TICKS", "3"))  # Legacy (nao usado com janela movel)
+    alert_window_size: int = int(os.getenv("PD_ALERT_WINDOW_SIZE", "5"))      # Tamanho da janela movel de severity
+    alert_min_hits: int = int(os.getenv("PD_ALERT_MIN_HITS", "2"))            # Min ticks com severity>0 na janela para escalar
     alert_cooldown_s: float = float(os.getenv("PD_ALERT_COOLDOWN_S", "5.0"))
     panic_threshold: float = float(os.getenv("PD_PANIC_THRESHOLD", "0.70"))
     panic_adverse_min: float = float(os.getenv("PD_PANIC_ADVERSE_MIN", "0.02"))

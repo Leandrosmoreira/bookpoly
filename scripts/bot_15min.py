@@ -115,6 +115,10 @@ _usdc_balance_cache: Optional[float] = None
 _usdc_balance_cache_ts: float = 0
 BALANCE_CACHE_TTL = 60  # Cache saldo por 60 segundos
 
+# Fila de resultados pendentes (posicoes cujo outcome nao foi obtido na transicao)
+# Chave: "asset:cycle_end_ts", Valor: dict com dados da posicao
+_pending_results: dict = {}
+
 
 def get_client() -> ClobClient:
     """Retorna cliente CLOB configurado."""
@@ -249,40 +253,63 @@ def fetch_market_status(asset: str) -> Optional[dict]:
         return None
 
 
-def _get_resolved_outcome(asset: str, cycle_end_ts: int) -> Optional[str]:
-    """Retorna qual outcome venceu ('YES' ou 'NO') após resolução. None se ainda não resolvido ou API sem dado."""
-    try:
-        http = get_http()
-        window_start = cycle_end_ts - 900
-        slug = f"{asset}-updown-15m-{window_start}"
-        r = http.get(f"{GAMMA_HOST}/events/slug/{slug}")
-        if r.status_code != 200:
-            return None
-        event = r.json()
-        markets = event.get("markets", [])
-        if not markets:
-            return None
-        market = markets[0]
-        # outcomePrices após resolução: "1,0" = YES venceu, "0,1" = NO venceu
-        raw = market.get("outcomePrices")
-        if raw is None:
-            return None
-        if isinstance(raw, str):
-            raw = [s.strip() for s in raw.split(",")] if "," in raw else [raw]
-        if not isinstance(raw, (list, tuple)) or len(raw) < 2:
-            return None
+def _get_resolved_outcome(asset: str, cycle_end_ts: int, retries: int = 3, delay: float = 3.0) -> Optional[str]:
+    """Retorna qual outcome venceu ('YES' ou 'NO') após resolução.
+
+    Faz até `retries` tentativas com `delay` segundos entre cada,
+    pois a Gamma API pode demorar para refletir a resolução.
+    Retorna None apenas se todas as tentativas falharem.
+    """
+    http = get_http()
+    window_start = cycle_end_ts - 900
+    slug = f"{asset}-updown-15m-{window_start}"
+
+    for attempt in range(retries):
         try:
-            p0 = float(raw[0])
-            p1 = float(raw[1])
-        except (TypeError, ValueError):
-            return None
-        if p0 >= 0.99 and p1 <= 0.01:
-            return "YES"
-        if p1 >= 0.99 and p0 <= 0.01:
-            return "NO"
-        return None
-    except Exception:
-        return None
+            r = http.get(f"{GAMMA_HOST}/events/slug/{slug}")
+            if r.status_code != 200:
+                if attempt < retries - 1:
+                    time.sleep(delay)
+                continue
+            event = r.json()
+            markets = event.get("markets", [])
+            if not markets:
+                if attempt < retries - 1:
+                    time.sleep(delay)
+                continue
+            market = markets[0]
+            # outcomePrices após resolução: "1,0" = YES venceu, "0,1" = NO venceu
+            raw = market.get("outcomePrices")
+            if raw is None:
+                if attempt < retries - 1:
+                    time.sleep(delay)
+                continue
+            if isinstance(raw, str):
+                raw = [s.strip() for s in raw.split(",")] if "," in raw else [raw]
+            if not isinstance(raw, (list, tuple)) or len(raw) < 2:
+                if attempt < retries - 1:
+                    time.sleep(delay)
+                continue
+            try:
+                p0 = float(raw[0])
+                p1 = float(raw[1])
+            except (TypeError, ValueError):
+                if attempt < retries - 1:
+                    time.sleep(delay)
+                continue
+            if p0 >= 0.99 and p1 <= 0.01:
+                return "YES"
+            if p1 >= 0.99 and p0 <= 0.01:
+                return "NO"
+            # outcomePrices existe mas nao e 1,0 ou 0,1 — mercado nao resolveu ainda
+            if attempt < retries - 1:
+                time.sleep(delay)
+                continue
+        except Exception:
+            if attempt < retries - 1:
+                time.sleep(delay)
+                continue
+    return None
 
 
 def _fetch_market_by_slug(http, asset: str, slug: str) -> Optional[dict]:
@@ -701,6 +728,31 @@ def main():
     while _running:
         now = int(time.time())
 
+        # ── Resolver resultados pendentes (posicoes cujo outcome nao foi obtido na transicao)
+        if _pending_results:
+            resolved_keys = []
+            for key, pdata in _pending_results.items():
+                outcome = _get_resolved_outcome(pdata["asset"], pdata["cycle_end_ts"], retries=1, delay=0)
+                if outcome is not None:
+                    win = pdata["side"] == outcome
+                    pnl = (1.0 - pdata["entry_price"]) * pdata["size"] if win else -pdata["entry_price"] * pdata["size"]
+                    # Usar contexto temporario para log
+                    tmp_ctx = MarketContext(asset=pdata["asset"])
+                    tmp_ctx.cycle_end_ts = pdata["cycle_end_ts"]
+                    log_event("POSITION_RESULT_RESOLVED", pdata["asset"], tmp_ctx,
+                        outcome_winner=outcome,
+                        side=pdata["side"],
+                        entry_price=pdata["entry_price"],
+                        size=pdata["size"],
+                        win=win,
+                        pnl=round(pnl, 2),
+                        hedge_shares=pdata["hedge_shares"],
+                        defense_phase=pdata["defense_phase"],
+                        entered_side_price_final=pdata["entered_side_price_final"])
+                    resolved_keys.append(key)
+            for key in resolved_keys:
+                del _pending_results[key]
+
         for asset in ASSETS:
             if not _running:
                 break
@@ -718,7 +770,9 @@ def main():
             no_price = market["no_price"]
             guardrails[asset].update(float(now), yes_price, no_price)
             # Feed midpoint ao engine (acumula historico, sem book = custo zero)
-            pd_engines[asset].update(float(now), yes_price, time_to_expiry)
+            # NOTA: durante HOLDING, o update roda na secao 6a (com book_json)
+            if ctx.state != MarketState.HOLDING:
+                pd_engines[asset].update(float(now), yes_price, time_to_expiry)
             yes_token = market["yes_token"]
             no_token = market["no_token"]
 
@@ -736,15 +790,15 @@ def main():
                 # Gravar resultado da posição do ciclo anterior ANTES de resetar
                 if ctx.state == MarketState.HOLDING and ctx.entered_side and ctx.entered_price is not None and old_cycle is not None:
                     outcome_winner = _get_resolved_outcome(asset, old_cycle)
+                    size = ctx.entered_size if ctx.entered_size is not None else MIN_SHARES
+                    hedge_total = ctx.defense_tracker.total_hedge_shares if ctx.defense_tracker else 0
+                    final_phase = ctx.defense_tracker.phase.value if ctx.defense_tracker else "NONE"
+                    entered_side_price_final = round(
+                        yes_price if ctx.entered_side == "YES" else no_price, 4
+                    )
                     if outcome_winner is not None:
                         win = ctx.entered_side == outcome_winner
-                        size = ctx.entered_size if ctx.entered_size is not None else MIN_SHARES
                         pnl = (1.0 - ctx.entered_price) * size if win else -ctx.entered_price * size
-                        hedge_total = ctx.defense_tracker.total_hedge_shares if ctx.defense_tracker else 0
-                        final_phase = ctx.defense_tracker.phase.value if ctx.defense_tracker else "NONE"
-                        entered_side_price_final = round(
-                            yes_price if ctx.entered_side == "YES" else no_price, 4
-                        )
                         log_event("POSITION_RESULT", asset, ctx,
                             outcome_winner=outcome_winner,
                             side=ctx.entered_side,
@@ -755,6 +809,26 @@ def main():
                             hedge_shares=hedge_total,
                             defense_phase=final_phase,
                             entered_side_price_final=entered_side_price_final)
+                    else:
+                        # API nao retornou resultado apos retries — salvar para resolver depois
+                        pending_key = f"{asset}:{old_cycle}"
+                        _pending_results[pending_key] = {
+                            "asset": asset,
+                            "cycle_end_ts": old_cycle,
+                            "side": ctx.entered_side,
+                            "entry_price": ctx.entered_price,
+                            "size": size,
+                            "hedge_shares": hedge_total,
+                            "defense_phase": final_phase,
+                            "entered_side_price_final": entered_side_price_final,
+                        }
+                        log_event("POSITION_RESULT_PENDING", asset, ctx,
+                            side=ctx.entered_side,
+                            entry_price=ctx.entered_price,
+                            size=size,
+                            hedge_shares=hedge_total,
+                            defense_phase=final_phase,
+                            reason="outcome_not_resolved_after_retries")
                 reset_context(ctx)
                 guardrails[asset].reset()
                 pd_engines[asset].clear_position()
