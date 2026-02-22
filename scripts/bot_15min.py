@@ -162,18 +162,45 @@ def get_http() -> httpx.Client:
 
 
 # ==============================================================================
-# LOGGING
+# LOGGING (persistent file handle + flush a cada write)
 # ==============================================================================
 
-def get_log_file() -> Path:
-    """Retorna path do arquivo de log do dia."""
-    LOGS_DIR.mkdir(exist_ok=True)
-    today = datetime.now().strftime("%Y-%m-%d")
-    return LOGS_DIR / f"bot_15min_{today}.jsonl"
+class _LogWriter:
+    """File handle persistente com flush() a cada write — evita perda de dados em crash."""
+
+    def __init__(self):
+        self._file = None
+        self._date: Optional[str] = None
+
+    def write(self, event: dict):
+        today = datetime.now().strftime("%Y-%m-%d")
+        if self._date != today or self._file is None:
+            self.close()
+            LOGS_DIR.mkdir(exist_ok=True)
+            self._file = open(LOGS_DIR / f"bot_15min_{today}.jsonl", "a", encoding="utf-8")
+            self._date = today
+        try:
+            self._file.write(json.dumps(event) + "\n")
+            self._file.flush()  # CRITICO: garante que dados vão pro disco
+        except Exception as e:
+            print(f"[LOG ERROR] {e}")
+
+    def close(self):
+        if self._file is not None:
+            try:
+                self._file.flush()
+                self._file.close()
+            except Exception:
+                pass
+            self._file = None
+            self._date = None
+
+
+_log_writer = _LogWriter()
 
 
 def log_event(action: str, asset: str, ctx: MarketContext, **extra):
-    """Grava evento no log JSONL."""
+    """Grava evento no log JSONL via _log_writer (flush garantido)."""
     now = int(time.time())
     event = {
         "ts": now,
@@ -188,9 +215,7 @@ def log_event(action: str, asset: str, ctx: MarketContext, **extra):
         **extra,
     }
 
-    log_file = get_log_file()
-    with open(log_file, "a") as f:
-        f.write(json.dumps(event) + "\n")
+    _log_writer.write(event)
 
     # Também exibe no console
     time_str = datetime.now().strftime("%H:%M:%S")
@@ -674,10 +699,15 @@ def reset_context(ctx: MarketContext):
 # ==============================================================================
 
 def signal_handler(signum, frame):
-    """Graceful shutdown."""
+    """Graceful shutdown com flush de logs."""
     global _running
-    print("\n[SHUTDOWN] Recebido sinal de parada...")
+    print(f"\n[SHUTDOWN] Sinal {signum} recebido, flushing logs...")
     _running = False
+    _log_writer.close()
+
+
+import atexit
+atexit.register(_log_writer.close)
 
 
 # ==============================================================================
@@ -731,8 +761,23 @@ def main():
         # ── Resolver resultados pendentes (posicoes cujo outcome nao foi obtido na transicao)
         if _pending_results:
             resolved_keys = []
-            for key, pdata in _pending_results.items():
-                outcome = _get_resolved_outcome(pdata["asset"], pdata["cycle_end_ts"], retries=1, delay=0)
+            for key, pdata in list(_pending_results.items()):
+                age = now - pdata.get("added_ts", now)
+                # Max age: 5 minutos — se nao resolveu, logar UNKNOWN e limpar
+                if age > 300:
+                    tmp_ctx = MarketContext(asset=pdata["asset"])
+                    tmp_ctx.cycle_end_ts = pdata["cycle_end_ts"]
+                    log_event("POSITION_RESULT_UNKNOWN", pdata["asset"], tmp_ctx,
+                        side=pdata["side"],
+                        entry_price=pdata["entry_price"],
+                        size=pdata["size"],
+                        hedge_shares=pdata["hedge_shares"],
+                        defense_phase=pdata["defense_phase"],
+                        age_s=age,
+                        reason="max_pending_age_exceeded")
+                    resolved_keys.append(key)
+                    continue
+                outcome = _get_resolved_outcome(pdata["asset"], pdata["cycle_end_ts"], retries=3, delay=2.0)
                 if outcome is not None:
                     win = pdata["side"] == outcome
                     pnl = (1.0 - pdata["entry_price"]) * pdata["size"] if win else -pdata["entry_price"] * pdata["size"]
@@ -821,6 +866,7 @@ def main():
                             "hedge_shares": hedge_total,
                             "defense_phase": final_phase,
                             "entered_side_price_final": entered_side_price_final,
+                            "added_ts": now,
                         }
                         log_event("POSITION_RESULT_PENDING", asset, ctx,
                             side=ctx.entered_side,
@@ -994,6 +1040,13 @@ def main():
                 reason=gr_decision.reason)
             if gr_decision.action == GuardrailAction.BLOCK:
                 log_event("GUARDRAIL_BLOCK", asset, ctx,
+                    side=side, risk_score=gr_decision.risk_score,
+                    reason=gr_decision.reason)
+                continue
+
+            # CAUTION tambem bloqueia — so ALLOW permite entrada
+            if gr_decision.action == GuardrailAction.CAUTION:
+                log_event("GUARDRAIL_CAUTION_BLOCK", asset, ctx,
                     side=side, risk_score=gr_decision.risk_score,
                     reason=gr_decision.reason)
                 continue

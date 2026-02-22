@@ -34,7 +34,7 @@ class DefenseStateTracker:
     phase: DefensePhase = DefensePhase.NORMAL
     phase_entered_ts: float = 0.0        # Quando entrou na fase atual
     alert_ticks: int = 0                 # Legacy (mantido para compatibilidade de log)
-    severity_window: deque = field(default_factory=lambda: deque(maxlen=5))  # Janela movel de severity
+    severity_window: deque = field(default_factory=lambda: deque(maxlen=3))  # Janela movel de severity
     severity_zero_since: float = 0.0     # Desde quando severity == 0 (para cooldown)
     last_hedge_ts: float = 0.0           # Timestamp do ultimo hedge
     total_hedge_shares: int = 0          # Total de shares hedgeadas neste ciclo

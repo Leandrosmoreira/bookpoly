@@ -96,6 +96,9 @@ class PostDefenseEngine:
         # ── Posição ──────────────────────────────────────────────
         self.position: Optional[PositionMeta] = None
 
+        # ── EMA do RPI (suaviza spikes de 1 tick) ──────────────
+        self._rpi_ema: float = 0.0
+
         # ── Logger JSONL ─────────────────────────────────────────
         self._log_file = None
         self._log_date: Optional[str] = None
@@ -120,6 +123,7 @@ class PostDefenseEngine:
     def clear_position(self):
         """Chamado no fim do ciclo ou saída."""
         self.position = None
+        self._rpi_ema = 0.0
         self._close_log()
 
     # ═══════════════════════════════════════════════════════════════
@@ -263,7 +267,7 @@ class PostDefenseEngine:
             regime_shift, z_velocity, z_imb, book_confirmed, spread,
         )
 
-        rpi = calc_rpi(
+        rpi_raw = calc_rpi(
             vol_ratio=vol_ratio,
             z_vol=z_vol,
             delta_vol_entry=delta_vol_entry,
@@ -274,6 +278,12 @@ class PostDefenseEngine:
             liquidity_vacuum=liquidity_vacuum,
             weights=cfg.rpi_weights,
         )
+
+        # EMA smoothing: suaviza spikes de 1 tick para que severity
+        # persista por 3-4 ticks apos um spike (alpha=0.3)
+        alpha = cfg.rpi_ema_alpha
+        self._rpi_ema = alpha * rpi_raw + (1.0 - alpha) * self._rpi_ema
+        rpi = round(self._rpi_ema, 4)
 
         self.rpi_history.append((ts, rpi))
 
@@ -319,6 +329,7 @@ class PostDefenseEngine:
             regime_shift_score=regime_shift,
             reversal_score=reversal_score,
             rpi=rpi,
+            rpi_raw=rpi_raw,
             rpi_threshold_dynamic=rpi_threshold,
             severity=severity,
         )

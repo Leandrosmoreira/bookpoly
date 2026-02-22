@@ -21,7 +21,7 @@ class PostDefenseConfig:
 
     # ── Direção ──────────────────────────────────────────────────
     velocity_window_s: int = int(os.getenv("PD_VELOCITY_WINDOW", "5"))
-    velocity_smooth_n: int = int(os.getenv("PD_VELOCITY_SMOOTH_N", "3"))
+    velocity_smooth_n: int = int(os.getenv("PD_VELOCITY_SMOOTH_N", "5"))
     z_velocity_window_s: int = int(os.getenv("PD_Z_VELOCITY_WINDOW", "60"))
 
     # ── Book ─────────────────────────────────────────────────────
@@ -38,6 +38,7 @@ class PostDefenseConfig:
     # ── RPI (Reversal Pressure Index) ────────────────────────────
     rpi_window_s: int = int(os.getenv("PD_RPI_WINDOW", "60"))
     rpi_k: float = float(os.getenv("PD_RPI_K", "1.5"))
+    rpi_ema_alpha: float = float(os.getenv("PD_RPI_EMA_ALPHA", "0.3"))
     rpi_weights: dict = field(default_factory=lambda: {
         "vol": float(os.getenv("PD_RPI_W_VOL", "0.40")),
         "dir": float(os.getenv("PD_RPI_W_DIR", "0.35")),
@@ -51,8 +52,8 @@ class PostDefenseConfig:
 
     # ── State Machine ──────────────────────────────────────────────
     alert_confirm_ticks: int = int(os.getenv("PD_ALERT_CONFIRM_TICKS", "3"))  # Legacy (nao usado com janela movel)
-    alert_window_size: int = int(os.getenv("PD_ALERT_WINDOW_SIZE", "5"))      # Tamanho da janela movel de severity
-    alert_min_hits: int = int(os.getenv("PD_ALERT_MIN_HITS", "2"))            # Min ticks com severity>0 na janela para escalar
+    alert_window_size: int = int(os.getenv("PD_ALERT_WINDOW_SIZE", "3"))      # Tamanho da janela movel de severity
+    alert_min_hits: int = int(os.getenv("PD_ALERT_MIN_HITS", "1"))            # Min ticks com severity>0 na janela para escalar
     alert_cooldown_s: float = float(os.getenv("PD_ALERT_COOLDOWN_S", "5.0"))
     panic_threshold: float = float(os.getenv("PD_PANIC_THRESHOLD", "0.70"))
     panic_adverse_min: float = float(os.getenv("PD_PANIC_ADVERSE_MIN", "0.02"))

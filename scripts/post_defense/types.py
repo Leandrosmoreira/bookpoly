@@ -84,8 +84,9 @@ class TickSnapshot:
     regime_shift_score: float
     reversal_score: float
     rpi: float
-    rpi_threshold_dynamic: float
-    severity: float
+    rpi_raw: float = 0.0             # RPI antes do EMA (para debug)
+    rpi_threshold_dynamic: float = 0.0
+    severity: float = 0.0
 
     def to_dict(self) -> dict:
         """Serializa para JSON (converte BookSnapshot aninhado)."""
