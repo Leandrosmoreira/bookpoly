@@ -92,6 +92,10 @@ class GuardrailConfig:
     # Reset: quantos segundos preservar no novo ciclo
     reset_preserve_s: int = int(os.getenv("GR_RESET_PRESERVE_S", "60"))
 
+    # Dados minimos para avaliar (amostras nos ultimos N segundos)
+    min_samples: int = int(os.getenv("GR_MIN_SAMPLES", "3"))
+    min_samples_window_s: int = int(os.getenv("GR_MIN_SAMPLES_WINDOW_S", "10"))
+
     # Enable/disable
     enabled: bool = os.getenv("GR_ENABLED", "true").lower() == "true"
 
@@ -236,7 +240,7 @@ class GuardrailsPro:
         band_ts = self._yes_band_entry_ts if candidate_side == "YES" else self._no_band_entry_ts
 
         # FIX 3: Dados insuficientes -> BLOCK (nao CAUTION)
-        if history.samples_in_window(now, 10) < 5:
+        if history.samples_in_window(now, cfg.min_samples_window_s) < cfg.min_samples:
             return GuardrailDecision(
                 action=GuardrailAction.BLOCK,
                 risk_score=1.0,
