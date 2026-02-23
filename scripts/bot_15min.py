@@ -64,7 +64,7 @@ MAX_PRICE = 0.98           # Preço máximo para entrada
 MIN_BALANCE_USDC = 6.5     # Saldo mínimo (USDC) para 6 shares @ 98%
 ORDER_FAIL_RETRY_DELAY = 2 # Segundos antes de reenviar após falha
 ORDER_FAIL_MAX_RETRIES = 2 # Tentativas de place_order antes de desistir
-MAX_RETRY_PRICE_DELTA = float(os.getenv("MAX_RETRY_PRICE_DELTA", "0.02"))  # Max centavos acima do preco original no retry
+MAX_RETRY_PRICE_DELTA = float(os.getenv("MAX_RETRY_PRICE_DELTA", "0.04"))  # Max centavos acima do preco original no retry
 
 # Mercados
 ASSETS = ['btc', 'eth', 'sol', 'xrp']
@@ -763,8 +763,8 @@ def main():
             resolved_keys = []
             for key, pdata in list(_pending_results.items()):
                 age = now - pdata.get("added_ts", now)
-                # Max age: 5 minutos — se nao resolveu, logar UNKNOWN e limpar
-                if age > 300:
+                # Max age: 10 minutos — se nao resolveu, logar UNKNOWN e limpar
+                if age > 600:
                     tmp_ctx = MarketContext(asset=pdata["asset"])
                     tmp_ctx.cycle_end_ts = pdata["cycle_end_ts"]
                     log_event("POSITION_RESULT_UNKNOWN", pdata["asset"], tmp_ctx,
@@ -777,7 +777,7 @@ def main():
                         reason="max_pending_age_exceeded")
                     resolved_keys.append(key)
                     continue
-                outcome = _get_resolved_outcome(pdata["asset"], pdata["cycle_end_ts"], retries=3, delay=2.0)
+                outcome = _get_resolved_outcome(pdata["asset"], pdata["cycle_end_ts"], retries=5, delay=5.0)
                 if outcome is not None:
                     win = pdata["side"] == outcome
                     pnl = (1.0 - pdata["entry_price"]) * pdata["size"] if win else -pdata["entry_price"] * pdata["size"]
@@ -834,7 +834,7 @@ def main():
                 old_cycle = ctx.cycle_end_ts
                 # Gravar resultado da posição do ciclo anterior ANTES de resetar
                 if ctx.state == MarketState.HOLDING and ctx.entered_side and ctx.entered_price is not None and old_cycle is not None:
-                    outcome_winner = _get_resolved_outcome(asset, old_cycle)
+                    outcome_winner = _get_resolved_outcome(asset, old_cycle, retries=5, delay=5.0)
                     size = ctx.entered_size if ctx.entered_size is not None else MIN_SHARES
                     hedge_total = ctx.defense_tracker.total_hedge_shares if ctx.defense_tracker else 0
                     final_phase = ctx.defense_tracker.phase.value if ctx.defense_tracker else "NONE"
@@ -1026,30 +1026,37 @@ def main():
                 continue
 
             # 7a. Guardrails PRO — filtro de entrada inteligente
-            gr_decision = guardrails[asset].evaluate(side, float(now))
-            log_event("GUARDRAIL_DECISION", asset, ctx,
-                gr_action=gr_decision.action.value, side=side,
-                risk_score=gr_decision.risk_score,
-                pump=gr_decision.pump_score,
-                pump_thr=gr_decision.pump_threshold,
-                stability=gr_decision.stability_score,
-                time_in_band=gr_decision.time_in_band_s,
-                momentum=gr_decision.momentum_score,
-                momentum_thr=gr_decision.momentum_threshold,
-                t_remaining=time_to_expiry,
-                reason=gr_decision.reason)
-            if gr_decision.action == GuardrailAction.BLOCK:
-                log_event("GUARDRAIL_BLOCK", asset, ctx,
-                    side=side, risk_score=gr_decision.risk_score,
+            # Skip guardrails na re-entry: a entrada ja foi aprovada na 1a tentativa.
+            # Apos fill loop bloqueante (~12s), o guardrail perde samples e bloqueia
+            # por insufficient_data. Bypass evita esse falso bloqueio.
+            if not ctx.skip_retried:
+                gr_decision = guardrails[asset].evaluate(side, float(now))
+                log_event("GUARDRAIL_DECISION", asset, ctx,
+                    gr_action=gr_decision.action.value, side=side,
+                    risk_score=gr_decision.risk_score,
+                    pump=gr_decision.pump_score,
+                    pump_thr=gr_decision.pump_threshold,
+                    stability=gr_decision.stability_score,
+                    time_in_band=gr_decision.time_in_band_s,
+                    momentum=gr_decision.momentum_score,
+                    momentum_thr=gr_decision.momentum_threshold,
+                    t_remaining=time_to_expiry,
                     reason=gr_decision.reason)
-                continue
+                if gr_decision.action == GuardrailAction.BLOCK:
+                    log_event("GUARDRAIL_BLOCK", asset, ctx,
+                        side=side, risk_score=gr_decision.risk_score,
+                        reason=gr_decision.reason)
+                    continue
 
-            # CAUTION tambem bloqueia — so ALLOW permite entrada
-            if gr_decision.action == GuardrailAction.CAUTION:
-                log_event("GUARDRAIL_CAUTION_BLOCK", asset, ctx,
-                    side=side, risk_score=gr_decision.risk_score,
-                    reason=gr_decision.reason)
-                continue
+                # CAUTION tambem bloqueia — so ALLOW permite entrada
+                if gr_decision.action == GuardrailAction.CAUTION:
+                    log_event("GUARDRAIL_CAUTION_BLOCK", asset, ctx,
+                        side=side, risk_score=gr_decision.risk_score,
+                        reason=gr_decision.reason)
+                    continue
+            else:
+                log_event("GUARDRAIL_SKIP_REENTRY", asset, ctx,
+                    side=side, reason="skip_retried_bypass")
 
             # 7b. Verificar saldo USDC antes de enviar ordem
             balance = get_usdc_balance()
