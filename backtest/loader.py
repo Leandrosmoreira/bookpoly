@@ -22,6 +22,18 @@ class WindowData:
     final_prob_up: float | None
 
 
+def _window_seconds_for_market(market: str) -> int:
+    """Return window duration in seconds from market name (e.g. BTC15m -> 900, BTC1h -> 3600)."""
+    m = (market or "").lower()
+    if "1h" in m or "1d" in m:
+        return 3600 if "1h" in m else 86400
+    if "4h" in m:
+        return 14400
+    if "5m" in m:
+        return 300
+    return 900  # 15m default
+
+
 def load_jsonl(filepath: Path) -> list[dict]:
     """
     Load all rows from a JSONL file.
@@ -55,19 +67,20 @@ def load_books_for_date(
     Args:
         data_dir: Base data directory (e.g., data/raw)
         date_str: Date string (e.g., "2026-02-06")
-        market: Market name (e.g., "BTC15m")
+        market: Market name (e.g., "BTC15m", "BTC1h")
 
     Returns:
-        List of book rows sorted by timestamp
+        List of book rows sorted by timestamp (error rows excluded)
     """
-    # Pattern: BTC15m_2026-02-06.jsonl
-    coin = market.replace("15m", "")
-    filepath = data_dir / "books" / f"{coin}15m_{date_str}.jsonl"
+    # Pattern: {market}_{date}.jsonl (e.g. BTC15m_2026-02-06.jsonl, BTC1h_2026-02-24.jsonl)
+    filepath = data_dir / "books" / f"{market}_{date_str}.jsonl"
 
     if not filepath.exists():
         return []
 
     rows = load_jsonl(filepath)
+    # Exclude error rows (err set) so backtest uses only valid book data
+    rows = [r for r in rows if not r.get("err")]
     return sorted(rows, key=lambda r: r.get("ts_ms", 0))
 
 
@@ -168,19 +181,25 @@ def determine_outcome(ticks: list[dict]) -> tuple[str | None, float | None]:
         prob_up = last_tick["probability"].get("prob_up")
 
     # From books JSONL
+    if prob_up is None and "derived" in last_tick:
+        prob_up = last_tick["derived"].get("prob_up")
     if prob_up is None and "yes" in last_tick:
         prob_up = last_tick["yes"].get("mid")
 
     if prob_up is None:
         return None, None
 
-    # Check if window is complete (should have ~900 ticks)
-    # We consider complete if we have ticks in the last 30 seconds
+    # Window duration and minimum elapsed to consider complete
     window_start = last_tick.get("window_start", 0)
     last_ts = last_tick.get("ts_ms", 0) / 1000
-
     elapsed = last_ts - window_start
-    if elapsed < 870:  # Less than 14.5 minutes
+
+    # Infer duration from market name in first tick if available
+    market = last_tick.get("market", "")
+    duration = _window_seconds_for_market(market)
+    min_elapsed = max(0, duration - 30)  # consider complete if within last 30s of window
+
+    if elapsed < min_elapsed:
         return None, prob_up  # Window not complete
 
     # Determine outcome
@@ -219,15 +238,17 @@ def iter_windows(
     while current <= end:
         date_str = current.strftime("%Y-%m-%d")
 
-        # Try to load signals first (preferred)
-        rows = load_signals_for_date(data_dir, date_str)
-
-        # Fall back to books if no signals
+        # Try signals first only for 15m (signals are 15m); otherwise use books
+        if market == "BTC15m":
+            rows = load_signals_for_date(data_dir, date_str)
+        else:
+            rows = []
         if not rows:
             rows = load_books_for_date(data_dir, date_str, market)
 
         if rows:
             windows = group_by_windows(rows)
+            duration = _window_seconds_for_market(market)
 
             for window_start, ticks in sorted(windows.items()):
                 outcome, final_prob = determine_outcome(ticks)
@@ -235,7 +256,7 @@ def iter_windows(
                 yield WindowData(
                     market=market,
                     window_start=window_start,
-                    window_end=window_start + 900,
+                    window_end=window_start + duration,
                     ticks=ticks,
                     outcome=outcome,
                     final_prob_up=final_prob,

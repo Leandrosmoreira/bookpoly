@@ -49,8 +49,10 @@ class DecisionConfig:
     # === FORCED ENTRY (override all filters) ===
     # Estratégia: Entrar APENAS nos últimos 4 minutos com prob >= 95% CONTRA o azarão
     force_entry_enabled: bool = True
-    force_entry_min_prob: float = 0.95  # 95% - probabilidade muito alta
-    force_entry_max_remaining_s: float = 240.0  # 4 minutos (últimos 4 min da janela)
+    force_entry_min_prob: float = 0.95  # Prob mínima do favorito (ex: 93%)
+    force_entry_max_prob: float = 1.0   # Prob máxima do favorito (ex: 98% = não entrar em 99%+)
+    force_entry_max_remaining_s: float = 240.0  # Pode entrar quando restam até X s (ex: 1080 = 18 min)
+    force_entry_min_remaining_s: float = 30.0   # Não entrar quando restam menos de Y s (ex: 300 = 5 min)
 
     # === REVERSAL DETECTION ===
     # Bloqueia entrada se detectar reversão contra nossa posição
@@ -136,19 +138,14 @@ def decide(
     if config is None:
         config = DecisionConfig()
 
-    # Determine which side we're betting on
-    # ESTRATÉGIA: Apostar COM o favorito (contra o azarão)
-    # "Contra azarão" = apostar que o FAVORITO vai ganhar
-    # Se prob_up >= 95%, entrar UP (favorito = UP, azarão = DOWN)
-    # Se prob_up <= 5%, entrar DOWN (favorito = DOWN, azarão = UP)
-    if prob_up >= 0.95:
-        side = Side.UP  # Favorito é UP, compramos UP a $0.95
+    # Determine which side we're betting on (favorito = lado com prob >= min_prob)
+    if prob_up >= config.force_entry_min_prob:
+        side = Side.UP
         prob_favorite = prob_up
-    elif prob_up <= 0.05:
-        side = Side.DOWN  # Favorito é DOWN, compramos DOWN a $0.95
+    elif prob_up <= (1 - config.force_entry_min_prob):
+        side = Side.DOWN
         prob_favorite = 1 - prob_up
     else:
-        # Para entradas normais (não forçadas), usar lógica padrão
         side = Side.UP if prob_up > 0.5 else Side.DOWN
         prob_favorite = max(prob_up, 1 - prob_up)
 
@@ -195,8 +192,13 @@ def decide(
     # 6. Score mínimo aceitável
     # 7. SEM reversão detectada contra nossa posição
     if config.force_entry_enabled and remaining_s is not None:
-        # Verificar se temos prob >= 95% em qualquer direção
-        has_extreme_prob = (prob_up >= config.force_entry_min_prob) or (prob_up <= (1 - config.force_entry_min_prob))
+        # Prob do favorito entre min e max (ex: 93% a 98%)
+        prob_favorite = max(prob_up, 1 - prob_up)
+        in_prob_range = (
+            (config.force_entry_min_prob <= prob_up <= config.force_entry_max_prob) or
+            (config.force_entry_min_prob <= (1 - prob_up) <= config.force_entry_max_prob)
+        )
+        has_extreme_prob = in_prob_range
 
         # Check for reversal even on forced entry
         reversal_blocks = (
@@ -220,8 +222,8 @@ def decide(
 
         if (
             has_extreme_prob
-            and remaining_s <= config.force_entry_max_remaining_s  # Últimos 4 minutos
-            and remaining_s >= 30  # Mas não nos últimos 30 segundos (segurança)
+            and remaining_s <= config.force_entry_max_remaining_s
+            and remaining_s >= config.force_entry_min_remaining_s
             and all_gates_passed  # OBRIGATÓRIO: Gates devem passar
             and zone not in config.blocked_zones  # OBRIGATÓRIO: Zone segura
             and (regime is None or regime not in config.blocked_regimes)  # OBRIGATÓRIO: Regime OK

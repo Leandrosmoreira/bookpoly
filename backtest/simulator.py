@@ -43,6 +43,7 @@ class WindowResult:
     trade: SimulatedTrade | None  # First entry (if any)
     final_prob_up: float | None
     outcome: str | None
+    market: str | None = None  # e.g. BTC1h (set by runner for multi-market)
 
 
 class Simulator:
@@ -75,6 +76,10 @@ class Simulator:
         poly_data: dict,
         binance_data: dict | None,
         coin: str = "btc",
+        window_duration_s: int | None = None,
+        entry_window_length_s: int | None = None,
+        entry_window_max_remaining_s: int | None = None,
+        entry_window_min_remaining_s: int | None = None,
     ) -> dict:
         """
         Simulate a single tick and return the decision.
@@ -83,16 +88,28 @@ class Simulator:
             poly_data: Polymarket book data
             binance_data: Binance volatility data
             coin: Coin symbol
+            window_duration_s: If set (e.g. 3600 for 1h), time gate uses last 4 min of window.
 
         Returns:
             Dict with decision details
         """
-        # Evaluate gates
-        gate_result = evaluate_gates(poly_data, binance_data, self.signal_config)
+        # Evaluate gates (pass window_duration_s and entry_window_length_s for 1h/4h/1d)
+        gate_result = evaluate_gates(
+            poly_data, binance_data, self.signal_config,
+            window_duration_s=window_duration_s,
+            entry_window_length_s=entry_window_length_s,
+            entry_window_max_remaining_s=entry_window_max_remaining_s,
+            entry_window_min_remaining_s=entry_window_min_remaining_s,
+        )
 
-        # Get probability
+        # Get probability (prefer derived.prob_up to align with loader outcome)
         yes_data = poly_data.get("yes", {}) or {}
-        prob_up = yes_data.get("mid", 0.5)
+        derived = poly_data.get("derived", {}) or {}
+        prob_up = derived.get("prob_up")
+        if prob_up is None:
+            prob_up = yes_data.get("mid", 0.5)
+        if prob_up is None:
+            prob_up = 0.5
         zone = get_probability_zone(prob_up)
 
         # Compute microstructure
@@ -149,6 +166,7 @@ class Simulator:
             persistence_s=state.persistence_s,
             score=score_result.score,
             regime=regime,
+            remaining_s=gate_result.time_remaining_s,
             config=self.decision_config,
         )
 
@@ -170,6 +188,10 @@ class Simulator:
         ticks: list[dict],
         outcome: str | None,
         coin: str = "btc",
+        window_duration_s: int | None = None,
+        entry_window_length_s: int | None = None,
+        entry_window_max_remaining_s: int | None = None,
+        entry_window_min_remaining_s: int | None = None,
     ) -> WindowResult:
         """
         Simulate a complete window.
@@ -178,6 +200,8 @@ class Simulator:
             ticks: List of ticks in the window
             outcome: Actual outcome ("UP" or "DOWN")
             coin: Coin symbol
+            window_duration_s: If set (e.g. 3600 for 1h), time gate uses last N min of window.
+            entry_window_length_s: If set (e.g. 900 for 15 min), entry window length in seconds.
 
         Returns:
             WindowResult with trade details
@@ -203,7 +227,13 @@ class Simulator:
             # Extract Binance data if available
             binance_data = tick.get("volatility_data") or tick.get("binance")
 
-            result = self.simulate_tick(tick, binance_data, coin)
+            result = self.simulate_tick(
+                tick, binance_data, coin,
+                window_duration_s=window_duration_s,
+                entry_window_length_s=entry_window_length_s,
+                entry_window_max_remaining_s=entry_window_max_remaining_s,
+                entry_window_min_remaining_s=entry_window_min_remaining_s,
+            )
 
             if result["action"] == Action.ENTER:
                 entry_signals += 1

@@ -27,27 +27,44 @@ def time_gate(
     window_start: int,
     now_ts: float,
     config: SignalConfig,
+    window_duration_s: int | None = None,
+    entry_window_length_s: int | None = None,
+    entry_window_max_remaining_s: int | None = None,
+    entry_window_min_remaining_s: int | None = None,
 ) -> tuple[bool, float]:
     """
-    Check if we're in the trading window (last 4 minutes, but not last 30s).
+    Check if we're in the trading window.
 
     Args:
-        window_start: Unix timestamp of 15-min window start
+        window_start: Unix timestamp of window start
         now_ts: Current timestamp
         config: Signal configuration
+        window_duration_s: If set (e.g. 3600 for 1h), use custom entry window.
+        entry_window_length_s: "Últimos N s" - janela = [duration-N, duration-30]. Usado se max/min remaining não forem passados.
+        entry_window_max_remaining_s: "Até X s restantes" - início da janela (ex: 900 = pode entrar quando há até 15 min).
+        entry_window_min_remaining_s: "Pelo menos Y s restantes" - fim da janela (ex: 300 = não entrar nos últimos 5 min).
 
-    Returns:
-        (gate_passed, time_remaining_seconds)
+    Exemplo "15 min restantes a 5 min restantes": max_remaining=900, min_remaining=300.
     """
     elapsed = now_ts - window_start
-    remaining = config.window_duration_s - elapsed
+    duration = window_duration_s if window_duration_s is not None else config.window_duration_s
+    remaining = duration - elapsed
 
-    # Must be in the entry window: between time_window_start_s and time_window_end_s
-    # Default: elapsed >= 660s (11 min passed) AND elapsed <= 870s (not in last 30s)
-    in_window = (
-        elapsed >= config.time_window_start_s and
-        elapsed <= config.time_window_end_s
-    )
+    if window_duration_s is not None:
+        if entry_window_max_remaining_s is not None and entry_window_min_remaining_s is not None:
+            # Janela por restante: [min_remaining, max_remaining] → elapsed em [duration-max_remaining, duration-min_remaining]
+            time_start = window_duration_s - entry_window_max_remaining_s
+            time_end = window_duration_s - entry_window_min_remaining_s
+        else:
+            # Últimos N s, menos últimos 30s
+            window_len = entry_window_length_s if entry_window_length_s is not None else 240
+            time_start = window_duration_s - window_len
+            time_end = window_duration_s - 30
+    else:
+        time_start = config.time_window_start_s
+        time_end = config.time_window_end_s
+
+    in_window = time_start <= elapsed <= time_end
 
     return in_window, remaining
 
@@ -172,6 +189,10 @@ def evaluate_gates(
     binance_data: dict | None,
     config: SignalConfig,
     now_ts: float | None = None,
+    window_duration_s: int | None = None,
+    entry_window_length_s: int | None = None,
+    entry_window_max_remaining_s: int | None = None,
+    entry_window_min_remaining_s: int | None = None,
 ) -> GateResult:
     """
     Evaluate all gates and return combined result.
@@ -181,6 +202,10 @@ def evaluate_gates(
         binance_data: Row from Binance volatility recorder (optional)
         config: Signal configuration
         now_ts: Override timestamp for backtesting (default: current time)
+        window_duration_s: If set (e.g. 3600 for 1h), time gate uses custom window.
+        entry_window_length_s: Length in seconds for "last N s" window (default 240).
+        entry_window_max_remaining_s: Entrar quando restar até X s (ex: 900 = 15 min).
+        entry_window_min_remaining_s: Não entrar quando restar menos de Y s (ex: 300 = 5 min).
 
     Returns:
         GateResult with all gate evaluations
@@ -200,7 +225,10 @@ def evaluate_gates(
     bid_depth = yes_data.get("bid_depth", 0)
     ask_depth = yes_data.get("ask_depth", 0)
     spread = yes_data.get("spread", 0)
-    mid = yes_data.get("mid", 0)
+    mid = yes_data.get("mid")
+    if mid is None:
+        mid = (polymarket_data.get("derived") or {}).get("prob_up")
+    mid = mid if mid is not None else 0
 
     # Extract Binance data
     rv_5m = None
@@ -212,7 +240,12 @@ def evaluate_gates(
         regime = class_data.get("cluster")
 
     # Evaluate each gate
-    time_ok, time_remaining = time_gate(window_start, now_ts, config)
+    time_ok, time_remaining = time_gate(
+        window_start, now_ts, config, window_duration_s,
+        entry_window_length_s=entry_window_length_s,
+        entry_window_max_remaining_s=entry_window_max_remaining_s,
+        entry_window_min_remaining_s=entry_window_min_remaining_s,
+    )
     liquidity_ok = liquidity_gate(bid_depth, ask_depth, config)
     spread_ok = spread_gate(spread, mid, config)
     stability_ok = stability_gate(rv_5m, regime, config)

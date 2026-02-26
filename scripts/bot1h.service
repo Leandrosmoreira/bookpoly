@@ -1,0 +1,33 @@
+# Serviço 24/7 para o bot 1h Polymarket (BTC, ETH, SOL, XRP)
+# Instalar: sudo cp scripts/bot1h.service /etc/systemd/system/
+#          sudo systemctl daemon-reload
+#          sudo systemctl enable bot1h
+#          sudo systemctl start bot1h
+#
+# Comandos: status -> sudo systemctl status bot1h
+#          logs   -> sudo journalctl -u bot1h -f
+#          parar  -> sudo systemctl stop bot1h
+
+[Unit]
+Description=Bot 1h Polymarket (BTC, ETH, SOL, XRP)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/bookpoly
+ExecStart=/root/bookpoly/venv/bin/python scripts/bot_1h.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=bot1h
+
+# Encerramento gracioso (Ctrl+C cancela ordens abertas)
+TimeoutStopSec=30
+KillMode=mixed
+
+[Install]
+WantedBy=multi-user.target
+

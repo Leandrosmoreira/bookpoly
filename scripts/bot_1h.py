@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-Bot 24/7 para mercados 15min do Polymarket (BTC, ETH, SOL, XRP).
+Bot 24/7 para mercados 1h do Polymarket (BTC, ETH, SOL, XRP).
 
 Estratégia:
-- Detecta ciclos de 15min automaticamente
-- Entra quando YES ou NO estiver entre 95%-98%
-- Janela de entrada: 4min a 1min antes da expiração
-- Timeout de fill: 10s
+- Detecta ciclos de 1h automaticamente
+- Entra quando YES ou NO estiver entre 96%-99%
+- Janela de entrada: 15min a 4min antes da expiração
+- Timeout de fill: 5s
 - Máximo 1 trade por ciclo por mercado
 
 USO:
-    python scripts/bot_15min.py
+    python scripts/bot_1h.py
 """
 
 import json
@@ -18,31 +18,31 @@ import os
 import signal
 import sys
 import time
-from dataclasses import dataclass, field
-from datetime import datetime
+import argparse
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Any
+from zoneinfo import ZoneInfo
 
 import httpx
-from dotenv import load_dotenv
 from guardrails import GuardrailsPro, GuardrailAction
 from post_defense import (
-    PostDefenseEngine, PostDefenseConfig, PositionMeta,
-    DefensePhase, DefenseStateTracker, DefenseDecision,
+    PostDefenseEngine,
+    PostDefenseConfig,
+    PositionMeta,
+    DefenseStateTracker,
     evaluate_defense as pd_evaluate,
 )
 from post_defense.hedge import get_opposite_token
 
-load_dotenv(Path(__file__).parent.parent / ".env")
-
 try:
-    from py_clob_client.client import ClobClient
-    from py_clob_client.clob_types import OrderArgs, OrderType, ApiCreds, BalanceAllowanceParams, AssetType
-    from py_clob_client.order_builder.constants import BUY
+    from dotenv import load_dotenv  # type: ignore
+
+    load_dotenv(Path(__file__).parent.parent / ".env")
 except ImportError:
-    print("ERRO: pip install py-clob-client")
-    sys.exit(1)
+    pass
 
 # ==============================================================================
 # CONSTANTES
@@ -52,22 +52,26 @@ CLOB_HOST = os.getenv("CLOB_BASE_URL", "https://clob.polymarket.com")
 GAMMA_HOST = os.getenv("GAMMA_BASE_URL", "https://gamma-api.polymarket.com")
 CHAIN_ID = 137
 
+WINDOW_SECONDS = 3600
+ET = ZoneInfo("America/New_York")
+COIN_FULL_NAME_1H = {"btc": "bitcoin", "eth": "ethereum", "sol": "solana", "xrp": "xrp"}
+
 # Configurações do bot
-POLL_SECONDS = 1           # Intervalo do loop principal
-ENTRY_WINDOW_START = 240   # Segundos antes da expiração (4min)
-ENTRY_WINDOW_END = 60      # Hard stop (1min)
-FILL_TIMEOUT = 5           # Segundos para aguardar fill por tentativa
-MAX_FILL_ATTEMPTS = 3      # Tentativas de ordem (1 inicial + 2 reenvios 1 tick abaixo) antes de SKIPPED
-MIN_SHARES = 8             # Quantidade por ordem
-MIN_PRICE = 0.93           # Preço mínimo para entrada (93%) — NÃO ALTERAR, definido pelo dono
-MAX_PRICE = 0.98           # Preço máximo para entrada
-MIN_BALANCE_USDC = 8.2     # Saldo mínimo (USDC) para 8 shares @ 98%
-ORDER_FAIL_RETRY_DELAY = 2 # Segundos antes de reenviar após falha
-ORDER_FAIL_MAX_RETRIES = 2 # Tentativas de place_order antes de desistir
+POLL_SECONDS = 1            # Intervalo do loop principal
+ENTRY_WINDOW_START = 900    # Segundos antes da expiração (15min)
+ENTRY_WINDOW_END = 240      # Hard stop (4min)
+FILL_TIMEOUT = 5            # Segundos para aguardar fill por tentativa
+MAX_FILL_ATTEMPTS = 3       # Tentativas de ordem antes de SKIPPED
+MIN_SHARES = 5              # Quantidade por ordem
+MIN_PRICE = 0.96            # Preço mínimo para entrada (96%)
+MAX_PRICE = 0.99            # Preço máximo para entrada (99%)
+MIN_BALANCE_USDC = 5.2      # Saldo mínimo (USDC) para 5 shares @ 99%
+ORDER_FAIL_RETRY_DELAY = 2  # Segundos antes de reenviar após falha
+ORDER_FAIL_MAX_RETRIES = 2  # Tentativas de place_order antes de desistir
 MAX_RETRY_PRICE_DELTA = float(os.getenv("MAX_RETRY_PRICE_DELTA", "0.04"))  # Max centavos acima do preco original no retry
 
 # Mercados
-ASSETS = ['btc', 'eth', 'sol', 'xrp']
+ASSETS = ["btc", "eth", "sol", "xrp"]
 
 # Diretório de logs
 LOGS_DIR = Path(__file__).parent.parent / "logs"
@@ -98,38 +102,38 @@ class MarketContext:
     entered_ts: Optional[int] = None
     yes_token_id: Optional[str] = None
     no_token_id: Optional[str] = None
-    skip_retried: bool = False  # True após dar uma nova chance após SKIPPED no mesmo ciclo
-    defense_tracker: Optional[DefenseStateTracker] = None  # State machine pós-defesa
-    yes_price: Optional[float] = None  # Probabilidade YES atual (CLOB)
-    no_price: Optional[float] = None   # Probabilidade NO atual (CLOB)
+    skip_retried: bool = False
+    defense_tracker: Optional[DefenseStateTracker] = None
+    yes_price: Optional[float] = None
+    no_price: Optional[float] = None
+    last_status_log_ts: int = 0
 
 
 # ==============================================================================
 # CLIENTE GLOBAL
 # ==============================================================================
 
-_client: Optional[ClobClient] = None
+_client: Any = None
 _http: Optional[httpx.Client] = None
 _running = True
 _usdc_balance_cache: Optional[float] = None
 _usdc_balance_cache_ts: float = 0
-BALANCE_CACHE_TTL = 60  # Cache saldo por 60 segundos
+BALANCE_CACHE_TTL = 60
 
-# Fila de resultados pendentes (posicoes cujo outcome nao foi obtido na transicao)
-# Chave: "asset:cycle_end_ts", Valor: dict com dados da posicao
 _pending_results: dict = {}
 
 
-def get_client() -> ClobClient:
-    """Retorna cliente CLOB configurado."""
+def get_client() -> Any:
     global _client
     if _client is None:
+        try:
+            from py_clob_client.client import ClobClient  # type: ignore
+        except ImportError as e:
+            raise RuntimeError("ERRO: pip install py-clob-client") from e
+
         pk = os.getenv("POLYMARKET_PRIVATE_KEY", "")
-        funder = os.getenv("POLYMARKET_FUNDER", "")
-
-        if not pk or not funder:
-            raise RuntimeError("Configure POLYMARKET_PRIVATE_KEY e POLYMARKET_FUNDER")
-
+        if not pk:
+            raise RuntimeError("Configure POLYMARKET_PRIVATE_KEY")
         if not pk.startswith("0x"):
             pk = f"0x{pk}"
 
@@ -138,112 +142,93 @@ def get_client() -> ClobClient:
             chain_id=CHAIN_ID,
             key=pk,
             signature_type=1,
-            funder=funder,
         )
-
-        api_key = os.getenv("POLYMARKET_API_KEY", "")
-        api_secret = os.getenv("POLYMARKET_API_SECRET", "")
-        api_pass = os.getenv("POLYMARKET_PASSPHRASE", "")
-
-        if api_key and api_secret and api_pass:
-            _client.set_api_creds(ApiCreds(api_key, api_secret, api_pass))
-        else:
-            _client.set_api_creds(_client.create_or_derive_api_creds())
-
     return _client
 
 
 def get_http() -> httpx.Client:
-    """Retorna cliente HTTP reutilizável."""
     global _http
     if _http is None:
         _http = httpx.Client(timeout=30)
     return _http
 
 
-# ==============================================================================
-# LOGGING (persistent file handle + flush a cada write)
-# ==============================================================================
-
-class _LogWriter:
-    """File handle persistente com flush() a cada write — evita perda de dados em crash."""
-
+class LogWriter:
     def __init__(self):
         self._file = None
-        self._date: Optional[str] = None
+        self._open()
 
-    def write(self, event: dict):
+    def _open(self):
+        LOGS_DIR.mkdir(parents=True, exist_ok=True)
         today = datetime.now().strftime("%Y-%m-%d")
-        if self._date != today or self._file is None:
-            self.close()
-            LOGS_DIR.mkdir(exist_ok=True)
-            self._file = open(LOGS_DIR / f"bot_15min_{today}.jsonl", "a", encoding="utf-8")
-            self._date = today
-        try:
-            self._file.write(json.dumps(event) + "\n")
-            self._file.flush()  # CRITICO: garante que dados vão pro disco
-        except Exception as e:
-            print(f"[LOG ERROR] {e}")
+        self._file = open(LOGS_DIR / f"bot_1h_{today}.jsonl", "a", encoding="utf-8")
+
+    def write(self, data: dict):
+        if not self._file:
+            self._open()
+        self._file.write(json.dumps(data, ensure_ascii=False) + "\n")
+        self._file.flush()
 
     def close(self):
-        if self._file is not None:
+        if self._file:
             try:
                 self._file.flush()
+            except Exception:
+                pass
+            try:
                 self._file.close()
             except Exception:
                 pass
             self._file = None
-            self._date = None
 
 
-_log_writer = _LogWriter()
+_log_writer = LogWriter()
 
 
 def log_event(action: str, asset: str, ctx: MarketContext, **extra):
-    """Grava evento no log JSONL via _log_writer (flush garantido)."""
     now = int(time.time())
-    event = {
+    payload = {
         "ts": now,
         "ts_iso": datetime.now().isoformat(),
-        "market": asset,
-        "cycle_end_ts": ctx.cycle_end_ts,
-        "state": ctx.state.value,
         "action": action,
+        "market": asset,
+        "state": ctx.state.value if ctx.state else None,
+        "cycle_end_ts": ctx.cycle_end_ts,
         "order_id": ctx.order_id,
+        "entered_side": ctx.entered_side,
+        "entered_price": ctx.entered_price,
+        "entered_size": ctx.entered_size,
+        "entered_ts": ctx.entered_ts,
+        "yes_token_id": ctx.yes_token_id,
+        "no_token_id": ctx.no_token_id,
         "yes_price": ctx.yes_price,
         "no_price": ctx.no_price,
         **extra,
     }
+    _log_writer.write(payload)
 
-    _log_writer.write(event)
-
-    # Também exibe no console
     time_str = datetime.now().strftime("%H:%M:%S")
-    state_str = ctx.state.value.ljust(12)
+    state_str = ctx.state.value if ctx.state else "?"
+    clob_str = ""
+    if ctx.yes_price is not None and ctx.no_price is not None:
+        clob_str = f"YES={ctx.yes_price:.3f} NO={ctx.no_price:.3f}"
+    extra_str = f"{extra}" if extra else ""
+    print(f"[{time_str}] {asset.upper().ljust(4)} | {state_str} | {clob_str} | {action} {extra_str}".rstrip())
 
-    # Probabilidades CLOB (sempre visíveis)
-    yp = ctx.yes_price
-    np_ = ctx.no_price
-    clob_str = f"yes={yp:.2f} no={np_:.2f}" if yp is not None and np_ is not None else ""
 
-    # Status P&L em tempo real (só durante HOLDING com posição ativa)
-    pos_str = ""
-    if (ctx.state == MarketState.HOLDING
-            and ctx.entered_side and ctx.entered_price is not None
-            and yp is not None and np_ is not None):
-        side_now, winning, pnl = calc_clob_pnl(
-            ctx.entered_side, ctx.entered_price,
-            yp, np_, ctx.entered_size or MIN_SHARES
-        )
-        emoji = "\u2705" if winning else "\u274c"
-        label = "WINNING" if winning else "LOSING"
-        pos_str = f"{ctx.entered_side}@{ctx.entered_price:.2f} now={side_now:.2f} {emoji}{label} ${pnl:+.2f}"
+# ==============================================================================
+# SLUG 1H
+# ==============================================================================
 
-    # Montar linha final
-    if pos_str:
-        print(f"[{time_str}] {asset.upper().ljust(4)} | {state_str} | {pos_str} | {clob_str} | {action} {extra if extra else ''}")
-    else:
-        print(f"[{time_str}] {asset.upper().ljust(4)} | {state_str} | {clob_str} | {action} {extra if extra else ''}")
+def slug_1h(asset: str, window_ts: int) -> str:
+    name = COIN_FULL_NAME_1H.get(asset.lower(), asset.lower())
+    dt_utc = datetime.fromtimestamp(window_ts, tz=timezone.utc)
+    dt_et = dt_utc.astimezone(ET)
+    month = dt_et.strftime("%B").lower()
+    day = dt_et.day
+    hour_12 = dt_et.hour % 12 or 12
+    am_pm = "am" if dt_et.hour < 12 else "pm"
+    return f"{name}-up-or-down-{month}-{day}-{hour_12}{am_pm}-et"
 
 
 # ==============================================================================
@@ -251,27 +236,19 @@ def log_event(action: str, asset: str, ctx: MarketContext, **extra):
 # ==============================================================================
 
 def fetch_market_status(asset: str) -> Optional[dict]:
-    """Busca status do mercado que está na janela de entrada.
-
-    Verifica tanto a janela atual quanto a anterior, retornando o mercado
-    que está dentro da janela de operação (ENTRY_WINDOW_START a ENTRY_WINDOW_END).
-    """
     try:
         http = get_http()
         now = int(time.time())
-        current_window = int(now // 900) * 900
+        current_window = int(now // WINDOW_SECONDS) * WINDOW_SECONDS
 
-        # Tentar ambas as janelas e retornar a que está na janela de entrada
-        for window_ts in [current_window, current_window - 900]:
-            slug = f"{asset}-updown-15m-{window_ts}"
-            result = _fetch_market_by_slug(http, asset, slug)
+        for window_ts in [current_window, current_window - WINDOW_SECONDS]:
+            slug = slug_1h(asset, window_ts)
+            result = _fetch_market_by_slug(http, asset, slug, window_ts)
             if result:
                 end_ts = result["end_ts"]
                 time_to_expiry = end_ts - now
-                # Retornar se estiver na janela de operação ou próximo dela
-                if time_to_expiry > -60:  # Ainda não expirou (ou expirou há menos de 60s)
+                if time_to_expiry > -60:
                     return result
-
         return None
     except Exception as e:
         print(f"[ERRO] fetch_market_status({asset}): {e}")
@@ -279,15 +256,9 @@ def fetch_market_status(asset: str) -> Optional[dict]:
 
 
 def _get_resolved_outcome(asset: str, cycle_end_ts: int, retries: int = 3, delay: float = 3.0) -> Optional[str]:
-    """Retorna qual outcome venceu ('YES' ou 'NO') após resolução.
-
-    Faz até `retries` tentativas com `delay` segundos entre cada,
-    pois a Gamma API pode demorar para refletir a resolução.
-    Retorna None apenas se todas as tentativas falharem.
-    """
     http = get_http()
-    window_start = cycle_end_ts - 900
-    slug = f"{asset}-updown-15m-{window_start}"
+    window_start = cycle_end_ts - WINDOW_SECONDS
+    slug = slug_1h(asset, window_start)
 
     for attempt in range(retries):
         try:
@@ -303,7 +274,6 @@ def _get_resolved_outcome(asset: str, cycle_end_ts: int, retries: int = 3, delay
                     time.sleep(delay)
                 continue
             market = markets[0]
-            # outcomePrices após resolução: "1,0" = YES venceu, "0,1" = NO venceu
             raw = market.get("outcomePrices")
             if raw is None:
                 if attempt < retries - 1:
@@ -326,7 +296,6 @@ def _get_resolved_outcome(asset: str, cycle_end_ts: int, retries: int = 3, delay
                 return "YES"
             if p1 >= 0.99 and p0 <= 0.01:
                 return "NO"
-            # outcomePrices existe mas nao e 1,0 ou 0,1 — mercado nao resolveu ainda
             if attempt < retries - 1:
                 time.sleep(delay)
                 continue
@@ -337,10 +306,8 @@ def _get_resolved_outcome(asset: str, cycle_end_ts: int, retries: int = 3, delay
     return None
 
 
-def _fetch_market_by_slug(http, asset: str, slug: str) -> Optional[dict]:
-    """Busca dados de um mercado específico pelo slug."""
+def _fetch_market_by_slug(http: httpx.Client, asset: str, slug: str, window_ts: int) -> Optional[dict]:
     try:
-
         r = http.get(f"{GAMMA_HOST}/events/slug/{slug}")
         if r.status_code != 200:
             return None
@@ -352,7 +319,6 @@ def _fetch_market_by_slug(http, asset: str, slug: str) -> Optional[dict]:
 
         market = markets[0]
 
-        # Token IDs
         raw = market.get("clobTokenIds")
         tokens = json.loads(raw) if isinstance(raw, str) else (raw or [])
         if len(tokens) < 2:
@@ -361,23 +327,19 @@ def _fetch_market_by_slug(http, asset: str, slug: str) -> Optional[dict]:
         yes_token = tokens[0]
         no_token = tokens[1]
 
-        # End time (expiração)
         end_date = market.get("endDate") or event.get("endDate")
         if end_date:
-            # Parse ISO date
             if end_date.endswith("Z"):
                 end_date = end_date[:-1] + "+00:00"
             from datetime import datetime as dt
             end_ts = int(dt.fromisoformat(end_date).timestamp())
         else:
-            # Fallback: assumir fim da janela
-            end_ts = int(slug.split("-")[-1]) + 900
+            end_ts = int(window_ts) + WINDOW_SECONDS
 
-        # Preços ao vivo do CLOB (midpoint ou book) — só dados reais; sem default 0.50
         yes_price = get_best_price(yes_token)
         no_price = get_best_price(no_token)
         if yes_price is None or no_price is None:
-            return None  # skip mercado sem preço real (evita dados fake)
+            return None
         yes_price = float(yes_price)
         no_price = float(no_price)
 
@@ -391,8 +353,7 @@ def _fetch_market_by_slug(http, asset: str, slug: str) -> Optional[dict]:
             "no_price": no_price,
             "title": event.get("title", slug),
         }
-
-    except Exception as e:
+    except Exception:
         return None
 
 
@@ -407,10 +368,8 @@ def _float_price(v) -> Optional[float]:
 
 
 def get_best_price(token_id: str) -> Optional[float]:
-    """Preço real ao vivo: CLOB /midpoint (oficial) ou mid do book (bid+ask)/2. Sem Gamma. None = sem dado real."""
     http = get_http()
     base = CLOB_HOST.rstrip("/")
-    # 1) Endpoint oficial Polymarket — midpoint
     try:
         r = http.get(f"{base}/midpoint", params={"token_id": token_id})
         if r.status_code == 200:
@@ -421,46 +380,45 @@ def get_best_price(token_id: str) -> Optional[float]:
                 return p
     except Exception:
         pass
-    # 2) Fallback: mid do orderbook (best_bid + best_ask) / 2
     try:
         r = http.get(f"{base}/book", params={"token_id": token_id})
         if r.status_code == 200:
             book = r.json()
             bids = book.get("bids", [])
             asks = book.get("asks", [])
-            best_bid = _float_price(bids[0].get("price") or bids[0].get("p")) if bids else None
-            best_ask = _float_price(asks[0].get("price") or asks[0].get("p")) if asks else None
-            if best_bid is not None and best_ask is not None:
-                return round((best_bid + best_ask) / 2, 2)
-            if best_ask is not None:
-                return best_ask
-            if best_bid is not None:
-                return best_bid
+            if not bids or not asks:
+                return None
+            best_bid = _float_price(bids[0].get("price") if isinstance(bids[0], dict) else None)
+            best_ask = _float_price(asks[0].get("price") if isinstance(asks[0], dict) else None)
+            if best_bid is None or best_ask is None:
+                return None
+            return round((best_bid + best_ask) / 2, 4)
     except Exception:
         pass
-    return None  # sem preço real — caller não deve usar 0.50
+    return None
 
 
 def get_best_ask(token_id: str) -> Optional[float]:
-    """Best ask do book CLOB (para colocar ordem 1 tick abaixo)."""
+    http = get_http()
+    base = CLOB_HOST.rstrip("/")
     try:
-        http = get_http()
-        r = http.get(f"{CLOB_HOST.rstrip('/')}/book", params={"token_id": token_id})
+        r = http.get(f"{base}/book", params={"token_id": token_id})
         if r.status_code == 200:
             book = r.json()
             asks = book.get("asks", [])
-            if asks:
-                return _float_price(asks[0].get("price") or asks[0].get("p"))
+            if not asks:
+                return None
+            return _float_price(asks[0].get("price"))
     except Exception:
         pass
     return None
 
 
 def fetch_book(token_id: str) -> Optional[dict]:
-    """Book completo do CLOB (bids + asks com quantidades). Para post_defense."""
+    http = get_http()
+    base = CLOB_HOST.rstrip("/")
     try:
-        http = get_http()
-        r = http.get(f"{CLOB_HOST.rstrip('/')}/book", params={"token_id": token_id})
+        r = http.get(f"{base}/book", params={"token_id": token_id})
         if r.status_code == 200:
             return r.json()
     except Exception:
@@ -468,132 +426,30 @@ def fetch_book(token_id: str) -> Optional[dict]:
     return None
 
 
-def calc_clob_pnl(entered_side: str, entered_price: float,
-                  yes_price: float, no_price: float, shares: float) -> tuple:
-    """P&L em tempo real baseado na probabilidade CLOB do lado posicionado.
-    Retorna (side_now_price, is_winning, potential_pnl).
-    """
-    side_now = yes_price if entered_side == "YES" else no_price
-    winning = side_now > entered_price
-    if winning:
-        pnl = round((1.0 - entered_price) * shares, 2)
-    else:
-        pnl = round(-entered_price * shares, 2)
-    return side_now, winning, pnl
-
-
-def get_outcome_prices(market: dict) -> tuple:
-    """Extrai preços YES/NO do market data da Gamma API."""
-    outcome_prices = market.get("outcomePrices")
-    if outcome_prices:
-        if isinstance(outcome_prices, str):
-            import json as _json
-            outcome_prices = _json.loads(outcome_prices)
-        if len(outcome_prices) >= 2:
-            return float(outcome_prices[0]), float(outcome_prices[1])
-    return 0.50, 0.50
-
-
-# ==============================================================================
-# SALDO USDC (opcional: requer web3)
-# ==============================================================================
-
-def _get_balance_wallet_address() -> Optional[str]:
-    """Endereço onde está o USDC (funder/proxy ou EOA)."""
-    funder = os.getenv("POLYMARKET_FUNDER", "").strip()
-    if funder:
-        return funder if funder.startswith("0x") else f"0x{funder}"
-    try:
-        from eth_account import Account
-        pk = os.getenv("POLYMARKET_PRIVATE_KEY", "")
-        if not pk.startswith("0x"):
-            pk = f"0x{pk}"
-        if pk:
-            return Account.from_key(pk).address
-    except Exception:
-        pass
-    return None
-
-
 def get_usdc_balance() -> Optional[float]:
-    """Saldo USDC on-chain (Polygon). Cacheado por 60s. Tenta vários RPCs em caso de falha/rate limit."""
     global _usdc_balance_cache, _usdc_balance_cache_ts
     now = time.time()
     if _usdc_balance_cache is not None and (now - _usdc_balance_cache_ts) < BALANCE_CACHE_TTL:
         return _usdc_balance_cache
-    result = _fetch_usdc_balance()
-    if result is not None:
-        _usdc_balance_cache = result
-        _usdc_balance_cache_ts = now
-    return result
 
-
-def _fetch_usdc_balance() -> Optional[float]:
-    """Busca saldo USDC disponível para trade.
-
-    Fonte primária: CLOB API get_balance_allowance(COLLATERAL).
-    Na Polymarket, USDC depositado vira collateral no CTF Exchange —
-    balanceOf on-chain retorna 0. A CLOB API retorna o saldo real.
-
-    Fallback: USDC ERC-20 on-chain (para wallets com USDC não-depositado).
-    """
-    # 1. CLOB API autenticada — saldo real no exchange (retorna em raw units, 6 decimais)
     try:
         client = get_client()
-        params = BalanceAllowanceParams(
-            asset_type=AssetType.COLLATERAL,
-            signature_type=1,  # POLY_PROXY
-        )
-        result = client.get_balance_allowance(params)
-        if isinstance(result, dict):
-            raw_balance = result.get("balance", "0")
-            return int(raw_balance) / 10**6
+        resp = client.get_balance_allowance()
+        if not isinstance(resp, dict):
+            return None
+        balances = resp.get("balances") or []
+        for b in balances:
+            if (b.get("asset_type") or "").lower() == "usdc":
+                bal = float(b.get("available") or 0)
+                _usdc_balance_cache = bal
+                _usdc_balance_cache_ts = now
+                return bal
     except Exception:
-        pass
-
-    # 2. Fallback: USDC ERC-20 on-chain
-    wallet = _get_balance_wallet_address()
-    if not wallet:
         return None
-    return _fetch_usdc_onchain(wallet)
-
-
-def _fetch_usdc_onchain(wallet: str) -> Optional[float]:
-    """Fallback: saldo USDC ERC-20 on-chain (Polygon)."""
-    try:
-        from web3 import Web3
-    except ImportError:
-        return None
-    try:
-        from polygon_rpc import get_web3_with_fallback, get_polygon_rpc_list
-    except ImportError:
-        get_web3_with_fallback = None
-        get_polygon_rpc_list = lambda: [os.getenv("POLYGON_RPC", "https://polygon-rpc.com")]
-    usdc_address = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
-    abi = [{"constant": True, "inputs": [{"name": "account", "type": "address"}], "name": "balanceOf", "outputs": [{"name": "", "type": "uint256"}], "type": "function"}]
-    urls = get_polygon_rpc_list()
-    if get_web3_with_fallback:
-        w3 = get_web3_with_fallback(timeout=5)
-        if w3:
-            try:
-                usdc = w3.eth.contract(address=Web3.to_checksum_address(usdc_address), abi=abi)
-                raw = usdc.functions.balanceOf(Web3.to_checksum_address(wallet)).call()
-                return raw / 10**6
-            except Exception:
-                pass
-    for rpc in urls:
-        try:
-            w3 = Web3(Web3.HTTPProvider(rpc, request_kwargs={"timeout": 5}))
-            usdc = w3.eth.contract(address=Web3.to_checksum_address(usdc_address), abi=abi)
-            raw = usdc.functions.balanceOf(Web3.to_checksum_address(wallet)).call()
-            return raw / 10**6
-        except Exception:
-            continue
     return None
 
 
 def place_order_with_retry(token_id: str, price: float, size: float) -> Optional[str]:
-    """Envia ordem com retry em caso de falha (até ORDER_FAIL_MAX_RETRIES)."""
     for attempt in range(ORDER_FAIL_MAX_RETRIES):
         order_id = place_order(token_id, price, size)
         if order_id:
@@ -603,57 +459,51 @@ def place_order_with_retry(token_id: str, price: float, size: float) -> Optional
     return None
 
 
-# ==============================================================================
-# FUNÇÕES DE ORDEM
-# ==============================================================================
-
 def place_order(token_id: str, price: float, size: float) -> Optional[str]:
-    """Envia ordem LIMIT POST_ONLY (maker)."""
     try:
+        from py_clob_client.clob_types import OrderArgs, OrderType  # type: ignore
+        from py_clob_client.order_builder.constants import BUY  # type: ignore
+
         client = get_client()
         order_args = OrderArgs(token_id=token_id, price=price, size=size, side=BUY)
         signed_order = client.create_order(order_args)
         resp = client.post_order(signed_order, OrderType.GTC, post_only=True)
-        if resp.get("success"):
+        if isinstance(resp, dict) and resp.get("orderID"):
             return resp.get("orderID")
-        else:
-            print(f"[ERRO] place_order: {resp}")
-            return None
+        print(f"[ERRO] place_order: {resp}")
     except Exception as e:
         print(f"[ERRO] place_order: {e}")
-        return None
+    return None
 
 
 def place_hedge_order(token_id: str, price: float, size: float) -> Optional[str]:
-    """Envia ordem de hedge FOK (taker, fill imediato)."""
     try:
+        from py_clob_client.clob_types import OrderArgs, OrderType  # type: ignore
+        from py_clob_client.order_builder.constants import BUY  # type: ignore
+
         client = get_client()
         order_args = OrderArgs(token_id=token_id, price=price, size=size, side=BUY)
         signed_order = client.create_order(order_args)
         resp = client.post_order(signed_order, OrderType.FOK, post_only=False)
-        if resp.get("success"):
+        if isinstance(resp, dict) and resp.get("orderID"):
             return resp.get("orderID")
-        else:
-            print(f"[ERRO] place_hedge_order: {resp}")
-            return None
+        print(f"[ERRO] place_hedge_order: {resp}")
     except Exception as e:
         print(f"[ERRO] place_hedge_order: {e}")
-        return None
+    return None
 
 
 def cancel_order(order_id: str) -> bool:
-    """Cancela uma ordem."""
     try:
         client = get_client()
         resp = client.cancel(order_id)
-        return resp.get("canceled", False) or resp.get("success", False)
+        return bool(resp)
     except Exception as e:
         print(f"[ERRO] cancel_order: {e}")
         return False
 
 
 def check_order_filled(order_id: str) -> bool:
-    """Verifica se ordem foi preenchida."""
     try:
         client = get_client()
         order = client.get_order(order_id)
@@ -666,7 +516,6 @@ def check_order_filled(order_id: str) -> bool:
 
 
 def wait_for_fill(order_id: str, timeout: int = FILL_TIMEOUT) -> bool:
-    """Aguarda fill até timeout."""
     start = time.time()
     while time.time() - start < timeout:
         if check_order_filled(order_id):
@@ -675,12 +524,8 @@ def wait_for_fill(order_id: str, timeout: int = FILL_TIMEOUT) -> bool:
     return False
 
 
-# ==============================================================================
-# RESET DE CONTEXTO
-# ==============================================================================
-
 def reset_context(ctx: MarketContext):
-    """Reseta contexto para novo ciclo."""
+    ctx.cycle_end_ts = None
     ctx.state = MarketState.IDLE
     ctx.trade_attempts = 0
     ctx.order_id = None
@@ -690,16 +535,9 @@ def reset_context(ctx: MarketContext):
     ctx.entered_ts = None
     ctx.skip_retried = False
     ctx.defense_tracker = None
-    ctx.yes_price = None
-    ctx.no_price = None
 
-
-# ==============================================================================
-# SIGNAL HANDLER
-# ==============================================================================
 
 def signal_handler(signum, frame):
-    """Graceful shutdown com flush de logs."""
     global _running
     print(f"\n[SHUTDOWN] Sinal {signum} recebido, flushing logs...")
     _running = False
@@ -707,6 +545,7 @@ def signal_handler(signum, frame):
 
 
 import atexit
+
 atexit.register(_log_writer.close)
 
 
@@ -717,36 +556,51 @@ atexit.register(_log_writer.close)
 def main():
     global _running
 
+    parser = argparse.ArgumentParser(description="Bot 1h Polymarket (BTC, ETH, SOL, XRP)")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Não envia ordens; apenas descobre mercados, imprime preços e registra decisões.",
+    )
+    parser.add_argument(
+        "--once",
+        action="store_true",
+        help="Executa uma iteração (um fetch por asset) e encerra. Útil para smoke-test.",
+    )
+    args = parser.parse_args()
+    dry_run = bool(args.dry_run or os.getenv("DRY_RUN", "").strip() == "1")
+
     print("=" * 60)
-    print("BOT 15MIN - POLYMARKET")
+    print("BOT 1H - POLYMARKET")
     print(f"MERCADOS: {', '.join(a.upper() for a in ASSETS)}")
     print(f"JANELA: {ENTRY_WINDOW_START}s a {ENTRY_WINDOW_END}s antes da expiração")
     print(f"RANGE: {MIN_PRICE*100:.0f}% a {MAX_PRICE*100:.0f}%")
     print(f"SHARES: {MIN_SHARES}")
+    if dry_run:
+        print("MODO: DRY-RUN (sem ordens)")
     print("=" * 60)
     print()
 
-    # Verificar credenciais
-    try:
-        client = get_client()
-        from eth_account import Account
-        pk = os.getenv("POLYMARKET_PRIVATE_KEY", "")
-        if not pk.startswith("0x"):
-            pk = f"0x{pk}"
-        signer = Account.from_key(pk).address
-        funder = os.getenv("POLYMARKET_FUNDER", "")
-        print(f"Signer: {signer}")
-        print(f"Funder: {funder}")
-        print()
-    except Exception as e:
-        print(f"ERRO: {e}")
-        sys.exit(1)
+    if not dry_run:
+        try:
+            get_client()
+            from eth_account import Account  # type: ignore
 
-    # Registrar signal handler
+            pk = os.getenv("POLYMARKET_PRIVATE_KEY", "")
+            if not pk.startswith("0x"):
+                pk = f"0x{pk}"
+            signer = Account.from_key(pk).address
+            funder = os.getenv("POLYMARKET_FUNDER", "")
+            print(f"Signer: {signer}")
+            print(f"Funder: {funder}")
+            print()
+        except Exception as e:
+            print(f"ERRO: {e}")
+            sys.exit(1)
+
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
-    # Inicializar contextos
     contexts = {asset: MarketContext(asset=asset) for asset in ASSETS}
     guardrails = {asset: GuardrailsPro(asset=asset) for asset in ASSETS}
     pd_config = PostDefenseConfig()
@@ -758,33 +612,37 @@ def main():
     while _running:
         now = int(time.time())
 
-        # ── Resolver resultados pendentes (posicoes cujo outcome nao foi obtido na transicao)
         if _pending_results:
             resolved_keys = []
             for key, pdata in list(_pending_results.items()):
                 age = now - pdata.get("added_ts", now)
-                # Max age: 10 minutos — se nao resolveu, logar UNKNOWN e limpar
                 if age > 600:
                     tmp_ctx = MarketContext(asset=pdata["asset"])
                     tmp_ctx.cycle_end_ts = pdata["cycle_end_ts"]
-                    log_event("POSITION_RESULT_UNKNOWN", pdata["asset"], tmp_ctx,
+                    log_event(
+                        "POSITION_RESULT_UNKNOWN",
+                        pdata["asset"],
+                        tmp_ctx,
                         side=pdata["side"],
                         entry_price=pdata["entry_price"],
                         size=pdata["size"],
                         hedge_shares=pdata["hedge_shares"],
                         defense_phase=pdata["defense_phase"],
                         age_s=age,
-                        reason="max_pending_age_exceeded")
+                        reason="max_pending_age_exceeded",
+                    )
                     resolved_keys.append(key)
                     continue
                 outcome = _get_resolved_outcome(pdata["asset"], pdata["cycle_end_ts"], retries=5, delay=5.0)
                 if outcome is not None:
                     win = pdata["side"] == outcome
                     pnl = (1.0 - pdata["entry_price"]) * pdata["size"] if win else -pdata["entry_price"] * pdata["size"]
-                    # Usar contexto temporario para log
                     tmp_ctx = MarketContext(asset=pdata["asset"])
                     tmp_ctx.cycle_end_ts = pdata["cycle_end_ts"]
-                    log_event("POSITION_RESULT_RESOLVED", pdata["asset"], tmp_ctx,
+                    log_event(
+                        "POSITION_RESULT_RESOLVED",
+                        pdata["asset"],
+                        tmp_ctx,
                         outcome_winner=outcome,
                         side=pdata["side"],
                         entry_price=pdata["entry_price"],
@@ -793,7 +651,8 @@ def main():
                         pnl=round(pnl, 2),
                         hedge_shares=pdata["hedge_shares"],
                         defense_phase=pdata["defense_phase"],
-                        entered_side_price_final=pdata["entered_side_price_final"])
+                        entered_side_price_final=pdata["entered_side_price_final"],
+                    )
                     resolved_keys.append(key)
             for key in resolved_keys:
                 del _pending_results[key]
@@ -803,8 +662,6 @@ def main():
                 break
 
             ctx = contexts[asset]
-
-            # 1. Buscar status do mercado
             market = fetch_market_status(asset)
             if not market:
                 continue
@@ -814,37 +671,44 @@ def main():
             yes_price = market["yes_price"]
             no_price = market["no_price"]
             guardrails[asset].update(float(now), yes_price, no_price)
-            # Feed midpoint ao engine (acumula historico, sem book = custo zero)
-            # NOTA: durante HOLDING, o update roda na secao 6a (com book_json)
             if ctx.state != MarketState.HOLDING:
                 pd_engines[asset].update(float(now), yes_price, time_to_expiry)
             yes_token = market["yes_token"]
             no_token = market["no_token"]
 
-            # Atualizar token IDs
             ctx.yes_token_id = yes_token
             ctx.no_token_id = no_token
-
-            # Atualizar probabilidades CLOB no contexto (para log_event)
             ctx.yes_price = round(yes_price, 4)
             ctx.no_price = round(no_price, 4)
 
-            # 2. Detectar novo ciclo
+            in_entry_window = (ENTRY_WINDOW_END <= time_to_expiry <= ENTRY_WINDOW_START)
+            status_interval_s = 1 if in_entry_window else 60
+            if (now - ctx.last_status_log_ts) >= status_interval_s:
+                ctx.last_status_log_ts = now
+                log_event(
+                    "STATUS",
+                    asset,
+                    ctx,
+                    time_to_expiry=time_to_expiry,
+                    in_entry_window=in_entry_window,
+                    slug=market.get("slug"),
+                )
+
             if ctx.cycle_end_ts != end_ts:
                 old_cycle = ctx.cycle_end_ts
-                # Gravar resultado da posição do ciclo anterior ANTES de resetar
                 if ctx.state == MarketState.HOLDING and ctx.entered_side and ctx.entered_price is not None and old_cycle is not None:
                     outcome_winner = _get_resolved_outcome(asset, old_cycle, retries=5, delay=5.0)
                     size = ctx.entered_size if ctx.entered_size is not None else MIN_SHARES
                     hedge_total = ctx.defense_tracker.total_hedge_shares if ctx.defense_tracker else 0
                     final_phase = ctx.defense_tracker.phase.value if ctx.defense_tracker else "NONE"
-                    entered_side_price_final = round(
-                        yes_price if ctx.entered_side == "YES" else no_price, 4
-                    )
+                    entered_side_price_final = round(yes_price if ctx.entered_side == "YES" else no_price, 4)
                     if outcome_winner is not None:
                         win = ctx.entered_side == outcome_winner
                         pnl = (1.0 - ctx.entered_price) * size if win else -ctx.entered_price * size
-                        log_event("POSITION_RESULT", asset, ctx,
+                        log_event(
+                            "POSITION_RESULT",
+                            asset,
+                            ctx,
                             outcome_winner=outcome_winner,
                             side=ctx.entered_side,
                             entry_price=ctx.entered_price,
@@ -853,9 +717,9 @@ def main():
                             pnl=round(pnl, 2),
                             hedge_shares=hedge_total,
                             defense_phase=final_phase,
-                            entered_side_price_final=entered_side_price_final)
+                            entered_side_price_final=entered_side_price_final,
+                        )
                     else:
-                        # API nao retornou resultado apos retries — salvar para resolver depois
                         pending_key = f"{asset}:{old_cycle}"
                         _pending_results[pending_key] = {
                             "asset": asset,
@@ -868,27 +732,29 @@ def main():
                             "entered_side_price_final": entered_side_price_final,
                             "added_ts": now,
                         }
-                        log_event("POSITION_RESULT_PENDING", asset, ctx,
+                        log_event(
+                            "POSITION_RESULT_PENDING",
+                            asset,
+                            ctx,
                             side=ctx.entered_side,
                             entry_price=ctx.entered_price,
                             size=size,
                             hedge_shares=hedge_total,
                             defense_phase=final_phase,
-                            reason="outcome_not_resolved_after_retries")
+                            reason="outcome_not_resolved_after_retries",
+                        )
                 reset_context(ctx)
                 guardrails[asset].reset()
                 pd_engines[asset].clear_position()
                 ctx.cycle_end_ts = end_ts
-                log_event("NEW_CYCLE", asset, ctx, end_ts=end_ts, title=market["title"])
+                log_event("NEW_CYCLE", asset, ctx, end_ts=end_ts, title=market["title"], slug=market.get("slug"))
 
-            # 3. Já expirou?
             if time_to_expiry <= 0:
                 if ctx.state not in (MarketState.DONE, MarketState.SKIPPED):
                     ctx.state = MarketState.DONE
                     log_event("EXPIRED", asset, ctx)
                 continue
 
-            # 4. Menos de 60s? Hard stop
             if time_to_expiry < ENTRY_WINDOW_END:
                 if ctx.state == MarketState.ORDER_PLACED:
                     cancel_order(ctx.order_id)
@@ -898,42 +764,34 @@ def main():
                     ctx.state = MarketState.SKIPPED
                 continue
 
-            # 5. Fora da janela de entrada?
             if time_to_expiry > ENTRY_WINDOW_START:
                 continue
 
-            # 5b. SKIPPED mas ainda na janela (5min–1min) e preço no range 93%–98%? Uma nova chance no mesmo ciclo.
             if ctx.state == MarketState.SKIPPED and not ctx.skip_retried:
                 if (MIN_PRICE <= yes_price <= MAX_PRICE) or (MIN_PRICE <= no_price <= MAX_PRICE):
                     ctx.state = MarketState.IDLE
                     ctx.trade_attempts = 0
                     ctx.skip_retried = True
-                    log_event("RE_ENTRY_AFTER_SKIP", asset, ctx, time_to_expiry=time_to_expiry, yes_price=round(yes_price, 2), no_price=round(no_price, 2))
+                    log_event(
+                        "RE_ENTRY_AFTER_SKIP",
+                        asset,
+                        ctx,
+                        time_to_expiry=time_to_expiry,
+                        yes_price=round(yes_price, 2),
+                        no_price=round(no_price, 2),
+                    )
 
-            # 6. Ciclo encerrado?
             if ctx.state in (MarketState.DONE, MarketState.SKIPPED):
                 continue
 
-            # 6a. HOLDING — defesa pos-entrada
             if ctx.state == MarketState.HOLDING:
                 if pd_config.enabled and ctx.defense_tracker is not None:
                     try:
-                        # Buscar book do token onde estamos posicionados
                         entered_token = ctx.yes_token_id if ctx.entered_side == "YES" else ctx.no_token_id
                         book_json = fetch_book(entered_token) if entered_token else None
-
-                        # Update engine com book (grava JSONL automaticamente)
-                        snap = pd_engines[asset].update(
-                            float(now), yes_price, time_to_expiry, book_json
-                        )
-
-                        # Best ask do lado oposto (para preco de hedge)
-                        opp_token, _ = get_opposite_token(
-                            ctx.entered_side, ctx.yes_token_id, ctx.no_token_id
-                        )
+                        snap = pd_engines[asset].update(float(now), yes_price, time_to_expiry, book_json)
+                        opp_token, _ = get_opposite_token(ctx.entered_side, ctx.yes_token_id, ctx.no_token_id)
                         best_ask_opp = get_best_ask(opp_token) if opp_token else None
-
-                        # Avaliar defesa
                         decision = pd_evaluate(
                             tracker=ctx.defense_tracker,
                             snap=snap,
@@ -945,72 +803,30 @@ def main():
                             config=pd_config,
                             now_ts=float(now),
                         )
-
-                        # Log transicao de fase
-                        if decision.phase_changed:
-                            log_event("DEFENSE_PHASE", asset, ctx,
-                                prev=decision.prev_phase.value,
-                                new=decision.phase.value,
-                                reason=decision.reason,
-                                severity=round(decision.severity, 4),
-                                rpi=round(decision.rpi, 4),
-                                adverse_move=decision.adverse_move)
-
-                        # Executar hedge se necessario
                         if decision.should_hedge and decision.hedge_shares > 0:
-                            # Verificar saldo antes de hedgear
-                            balance = get_usdc_balance()
                             hedge_cost = decision.hedge_price * decision.hedge_shares
-                            if balance is not None and balance < hedge_cost:
-                                log_event("HEDGE_NO_BALANCE", asset, ctx,
-                                    balance=round(balance, 2), needed=round(hedge_cost, 2))
-                            else:
-                                log_event("HEDGE_PLACING", asset, ctx,
-                                    phase=decision.phase.value,
-                                    shares=decision.hedge_shares,
-                                    price=decision.hedge_price,
-                                    side=decision.hedge_side,
-                                    severity=round(decision.severity, 4))
-
-                                hedge_id = place_hedge_order(
-                                    decision.hedge_token_id,
-                                    decision.hedge_price,
-                                    decision.hedge_shares,
-                                )
-
+                            if hedge_cost > 0:
+                                log_event("HEDGE_PLACING", asset, ctx, shares=decision.hedge_shares, price=decision.hedge_price)
+                                hedge_id = place_hedge_order(decision.hedge_token_id, decision.hedge_price, decision.hedge_shares)
                                 if hedge_id:
-                                    # FOK: fill e imediato, verificar resultado
                                     filled = check_order_filled(hedge_id)
                                     if filled:
                                         ctx.defense_tracker.total_hedge_shares += decision.hedge_shares
                                         ctx.defense_tracker.last_hedge_ts = float(now)
                                         ctx.defense_tracker.hedge_order_id = hedge_id
-                                        log_event("HEDGE_FILLED", asset, ctx,
-                                            phase=decision.phase.value,
-                                            shares=decision.hedge_shares,
-                                            price=decision.hedge_price,
-                                            total_hedged=ctx.defense_tracker.total_hedge_shares)
+                                        log_event("HEDGE_FILLED", asset, ctx, shares=decision.hedge_shares, price=decision.hedge_price, total_hedged=ctx.defense_tracker.total_hedge_shares)
                                     else:
-                                        log_event("HEDGE_NOT_FILLED", asset, ctx,
-                                            phase=decision.phase.value,
-                                            shares=decision.hedge_shares,
-                                            reason="FOK_not_matched")
+                                        log_event("HEDGE_NOT_FILLED", asset, ctx, shares=decision.hedge_shares, reason="FOK_not_matched")
                                 else:
-                                    log_event("HEDGE_FAILED", asset, ctx,
-                                        phase=decision.phase.value,
-                                        reason="order_rejected")
-
+                                    log_event("HEDGE_FAILED", asset, ctx, reason="order_rejected")
                     except Exception as e:
                         print(f"[ERRO] post_defense({asset}): {e}")
-
-                continue  # HOLDING nao entra na logica de entrada
+                continue
 
             if ctx.trade_attempts >= 1:
-                continue  # ja deu fill neste ciclo — nao reenvia
+                continue
 
-            # 7. Verificar condição 95%-98%
             side, token_id, price = None, None, None
-
             if MIN_PRICE <= yes_price <= MAX_PRICE:
                 side = "YES"
                 token_id = yes_token
@@ -1021,18 +837,17 @@ def main():
                 price = max(0.01, round(no_price - 0.01, 2))
 
             if not side:
-                # Na janela mas preço fora do range 95%-98% — log para diagnóstico
                 log_event("SKIP_PRICE_OOR", asset, ctx, yes_price=round(yes_price, 2), no_price=round(no_price, 2), time_to_expiry=time_to_expiry)
                 continue
 
-            # 7a. Guardrails PRO — filtro de entrada inteligente
-            # Skip guardrails na re-entry: a entrada ja foi aprovada na 1a tentativa.
-            # Apos fill loop bloqueante (~12s), o guardrail perde samples e bloqueia
-            # por insufficient_data. Bypass evita esse falso bloqueio.
             if not ctx.skip_retried:
                 gr_decision = guardrails[asset].evaluate(side, float(now))
-                log_event("GUARDRAIL_DECISION", asset, ctx,
-                    gr_action=gr_decision.action.value, side=side,
+                log_event(
+                    "GUARDRAIL_DECISION",
+                    asset,
+                    ctx,
+                    gr_action=gr_decision.action.value,
+                    side=side,
                     risk_score=gr_decision.risk_score,
                     pump=gr_decision.pump_score,
                     pump_thr=gr_decision.pump_threshold,
@@ -1041,32 +856,36 @@ def main():
                     momentum=gr_decision.momentum_score,
                     momentum_thr=gr_decision.momentum_threshold,
                     t_remaining=time_to_expiry,
-                    reason=gr_decision.reason)
-                if gr_decision.action == GuardrailAction.BLOCK:
-                    log_event("GUARDRAIL_BLOCK", asset, ctx,
-                        side=side, risk_score=gr_decision.risk_score,
-                        reason=gr_decision.reason)
-                    continue
-
-                # CAUTION tambem bloqueia — so ALLOW permite entrada
-                if gr_decision.action == GuardrailAction.CAUTION:
-                    log_event("GUARDRAIL_CAUTION_BLOCK", asset, ctx,
-                        side=side, risk_score=gr_decision.risk_score,
-                        reason=gr_decision.reason)
+                    reason=gr_decision.reason,
+                )
+                if gr_decision.action in (GuardrailAction.BLOCK, GuardrailAction.CAUTION):
+                    log_event("GUARDRAIL_BLOCK", asset, ctx, side=side, risk_score=gr_decision.risk_score, reason=gr_decision.reason)
                     continue
             else:
-                log_event("GUARDRAIL_SKIP_REENTRY", asset, ctx,
-                    side=side, reason="skip_retried_bypass")
+                log_event("GUARDRAIL_SKIP_REENTRY", asset, ctx, side=side, reason="skip_retried_bypass")
 
-            # 7b. Verificar saldo USDC antes de enviar ordem
+            if dry_run:
+                ctx.trade_attempts += 1
+                ctx.state = MarketState.SKIPPED
+                log_event(
+                    "DRYRUN_WOULD_PLACE_ORDER",
+                    asset,
+                    ctx,
+                    side=side,
+                    token_id=token_id,
+                    would_price=price,
+                    shares=MIN_SHARES,
+                    time_to_expiry=time_to_expiry,
+                    slug=market.get("slug"),
+                )
+                continue
+
             balance = get_usdc_balance()
             if balance is not None and balance < MIN_BALANCE_USDC:
                 log_event("SKIP_INSUFFICIENT_BALANCE", asset, ctx, balance=round(balance, 2), required=MIN_BALANCE_USDC)
                 continue
 
-            # 8. Enviar ordem e aguardar fill — até MAX_FILL_ATTEMPTS tentativas (15s cada)
             current_price = price
-            filled = False
             for attempt in range(MAX_FILL_ATTEMPTS):
                 is_retry = attempt > 0
                 log_event("PLACING_ORDER", asset, ctx, side=side, price=current_price, size=MIN_SHARES, time_to_expiry=time_to_expiry, retry=is_retry)
@@ -1089,7 +908,6 @@ def main():
                     ctx.entered_ts = now
                     ctx.order_id = None
                     log_event("FILLED", asset, ctx, side=side, price=current_price)
-                    # Iniciar tracking de defesa pos-entrada
                     if pd_config.enabled:
                         vol_s, vol_l, z_v = pd_engines[asset].snapshot_regime()
                         meta = PositionMeta(
@@ -1104,9 +922,7 @@ def main():
                         )
                         pd_engines[asset].start_position(meta)
                         ctx.defense_tracker = DefenseStateTracker()
-                        log_event("DEFENSE_STARTED", asset, ctx,
-                            vol_entry_short=round(vol_s, 6),
-                            vol_entry_long=round(vol_l, 6))
+                        log_event("DEFENSE_STARTED", asset, ctx, vol_entry_short=round(vol_s, 6), vol_entry_long=round(vol_l, 6))
                     break
                 cancel_order(order_id)
                 ctx.order_id = None
@@ -1122,10 +938,7 @@ def main():
                     break
                 current_price = max(0.01, min(MAX_PRICE, round(best_ask - 0.01, 2)))
                 if current_price > price + MAX_RETRY_PRICE_DELTA:
-                    log_event("RETRY_PRICE_TOO_HIGH", asset, ctx,
-                        original_price=price, retry_price=current_price,
-                        delta=round(current_price - price, 2),
-                        max_delta=MAX_RETRY_PRICE_DELTA)
+                    log_event("RETRY_PRICE_TOO_HIGH", asset, ctx, original_price=price, retry_price=current_price, delta=round(current_price - price, 2), max_delta=MAX_RETRY_PRICE_DELTA)
                     ctx.trade_attempts += 1
                     ctx.state = MarketState.SKIPPED
                     break
@@ -1134,10 +947,10 @@ def main():
                     ctx.state = MarketState.SKIPPED
                     break
 
-        # Aguardar próximo ciclo
         time.sleep(POLL_SECONDS)
+        if args.once:
+            break
 
-    # Cleanup
     print()
     print("[SHUTDOWN] Cancelando ordens abertas...")
     for asset, ctx in contexts.items():
@@ -1153,3 +966,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

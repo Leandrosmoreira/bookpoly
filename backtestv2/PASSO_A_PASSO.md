@@ -6,6 +6,16 @@
 - Projeto bookpoly clonado
 - Dependencias instaladas (`pip install -r requirements.txt`)
 
+**Se `python` nao for encontrado:** use `python3` ou o interpretador do venv:
+```bash
+# Opcao A: python3
+python3 -m backtest.run --market BTC1h --start 2026-02-24 --end 2026-02-24 -v
+
+# Opcao B: venv do projeto (recomendado)
+cd /root/bookpoly
+./venv/bin/python backtest/run.py --market BTC1h --start 2026-02-24 --end 2026-02-24 -v
+```
+
 ---
 
 ## 1. Preparar o arquivo JSONL
@@ -354,3 +364,42 @@ def convert_to_bookpoly(input_file, output_file, market="BTC15m", window_duratio
 [ ] 6. Rodar: python -m backtest.run --market {MERCADO} --start {DATA} --end {DATA}
 [ ] 7. Analisar resultado: win_rate, PnL, profit_factor, sharpe
 ```
+
+---
+
+## 8. Backtest v2 — Grid de parâmetros
+
+O script `run_param_grid.py` roda o backtest com **6 conjuntos de parâmetros** (Min/Max Prob., Min/Max Tempo Restante, Share) nos dados **BTC1h, ETH1h, SOL1h, XRP1h** para **2026-02-22 a 2026-02-24**.
+
+### Parâmetros usados (tabela)
+
+| Min Prob. | Max Prob. | Min Tempo Restante | Max Tempo Restante | Share |
+|-----------|-----------|--------------------|--------------------|-------|
+| 93%       | 99%       | 5 min              | 15 min             | 5     |
+| 95%       | 99%       | 3min30s            | 15 min             | 5     |
+| 95%       | 99%       | 5 min              | 18 min             | 5     |
+| 95%       | 99%       | 3 min              | 12 min             | 5     |
+| 93%       | 99%       | 3 min              | 12 min             | 5     |
+| 92%       | 99%       | 4 min              | 12 min             | 5     |
+
+### Como rodar
+
+```bash
+cd /root/bookpoly   # ou raiz do projeto
+
+# Padrão: data/raw, BTC1h+ETH1h+SOL1h+XRP1h, 2026-02-22 a 2026-02-24
+python3 -m backtestv2.run_param_grid
+
+# Com diretório e verbose
+python3 -m backtestv2.run_param_grid --data-dir data/raw -v
+
+# Um mercado, um dia (teste rápido)
+python3 -m backtestv2.run_param_grid --markets BTC1h --start 2026-02-24 --end 2026-02-24 -v
+```
+
+### Saída
+
+- Tabela resumo: cada linha = um conjunto de parâmetros (Entries, Win%, P&L em $ com 5 shares/trade, Sharpe).
+- Melhor conjunto: detalhe do conjunto com maior P&L total.
+
+Os arquivos de book devem estar em `data/raw/books/` no formato `{MERCADO}_{YYYY-MM-DD}.jsonl` (ex.: `BTC1h_2026-02-22.jsonl`).
