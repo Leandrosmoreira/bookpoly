@@ -1,0 +1,34 @@
+# Serviço 24/7 para o bot 5min Polymarket (BTC, ETH, SOL, XRP)
+# Instalar: sudo cp scripts/bot5min.service /etc/systemd/system/
+#          sudo systemctl daemon-reload
+#          sudo systemctl enable bot5min
+#          sudo systemctl start bot5min
+#
+# Comandos: status -> sudo systemctl status bot5min
+#          logs   -> sudo journalctl -u bot5min -f
+#          parar  -> sudo systemctl stop bot5min
+
+[Unit]
+Description=Bot 5min Polymarket (BTC, ETH, SOL, XRP)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/bookpoly
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/root/bookpoly/.venv/bin/python -u scripts/bot_5min.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=bot5min
+
+# Encerramento gracioso (Ctrl+C cancela ordens abertas)
+TimeoutStopSec=30
+KillMode=mixed
+
+[Install]
+WantedBy=multi-user.target
+
