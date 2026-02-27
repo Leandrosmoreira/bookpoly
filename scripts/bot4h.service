@@ -18,7 +18,7 @@ Type=simple
 User=root
 WorkingDirectory=/root/bookpoly
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/root/bookpoly/venv/bin/python -u scripts/bot_4h.py
+ExecStart=/root/bookpoly/.venv/bin/python -u scripts/bot_4h.py
 Restart=always
 RestartSec=10
 StandardOutput=journal

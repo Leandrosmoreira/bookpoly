@@ -63,7 +63,7 @@ ORDER_FAIL_MAX_RETRIES = 2  # Tentativas de place_order antes de desistir
 MAX_RETRY_PRICE_DELTA = float(os.getenv("MAX_RETRY_PRICE_DELTA", "0.04"))  # Max centavos acima do preco original no retry
 
 # Stop-loss
-STOP_PROB = float(os.getenv("BL_STOP_PROB", "0.70"))           # Vende se prob do lado cair abaixo
+STOP_PROB = float(os.getenv("BL_STOP_PROB", "0.40"))           # Vende se prob do lado cair abaixo
 
 # Mercados
 ASSETS = ["btc", "eth", "sol", "xrp"]
