@@ -6,7 +6,7 @@ Estratégia:
 - Detecta ciclos de 1h automaticamente
 - Entra quando YES ou NO estiver entre 96%-99%
 - Janela de entrada: 15min a 4min antes da expiração
-- Timeout de fill: 5s
+- Stop-loss: vende (SELL FOK) se prob do lado cair abaixo de 70%
 - Máximo 1 trade por ciclo por mercado
 
 USO:
@@ -28,14 +28,6 @@ from zoneinfo import ZoneInfo
 
 import httpx
 from guardrails import GuardrailsPro, GuardrailAction
-from post_defense import (
-    PostDefenseEngine,
-    PostDefenseConfig,
-    PositionMeta,
-    DefenseStateTracker,
-    evaluate_defense as pd_evaluate,
-)
-from post_defense.hedge import get_opposite_token
 
 try:
     from dotenv import load_dotenv  # type: ignore
@@ -62,13 +54,16 @@ ENTRY_WINDOW_START = 900    # Segundos antes da expiração (15min)
 ENTRY_WINDOW_END = 240      # Hard stop (4min)
 FILL_TIMEOUT = 5            # Segundos para aguardar fill por tentativa
 MAX_FILL_ATTEMPTS = 3       # Tentativas de ordem antes de SKIPPED
-MIN_SHARES = 5              # Quantidade por ordem
+MIN_SHARES = 6              # Quantidade por ordem
 MIN_PRICE = 0.96            # Preço mínimo para entrada (96%)
 MAX_PRICE = 0.99            # Preço máximo para entrada (99%)
-MIN_BALANCE_USDC = 5.2      # Saldo mínimo (USDC) para 5 shares @ 99%
+MIN_BALANCE_USDC = 6.5      # Saldo mínimo (USDC) para 6 shares @ 99%
 ORDER_FAIL_RETRY_DELAY = 2  # Segundos antes de reenviar após falha
 ORDER_FAIL_MAX_RETRIES = 2  # Tentativas de place_order antes de desistir
 MAX_RETRY_PRICE_DELTA = float(os.getenv("MAX_RETRY_PRICE_DELTA", "0.04"))  # Max centavos acima do preco original no retry
+
+# Stop-loss
+STOP_PROB = float(os.getenv("BL_STOP_PROB", "0.70"))           # Vende se prob do lado cair abaixo
 
 # Mercados
 ASSETS = ["btc", "eth", "sol", "xrp"]
@@ -103,10 +98,16 @@ class MarketContext:
     yes_token_id: Optional[str] = None
     no_token_id: Optional[str] = None
     skip_retried: bool = False
-    defense_tracker: Optional[DefenseStateTracker] = None
     yes_price: Optional[float] = None
     no_price: Optional[float] = None
     last_status_log_ts: int = 0
+    # Stop-loss
+    stop_executed: bool = False
+    stop_price: Optional[float] = None
+    stop_size: Optional[int] = None
+    stop_ts: Optional[int] = None
+    stop_order_id: Optional[str] = None
+    stop_pnl: Optional[float] = None
 
 
 # ==============================================================================
@@ -127,13 +128,15 @@ def get_client() -> Any:
     global _client
     if _client is None:
         try:
-            from py_clob_client.client import ClobClient  # type: ignore
+            from py_clob_client.client import ClobClient
+            from py_clob_client.clob_types import ApiCreds
         except ImportError as e:
             raise RuntimeError("ERRO: pip install py-clob-client") from e
 
         pk = os.getenv("POLYMARKET_PRIVATE_KEY", "")
-        if not pk:
-            raise RuntimeError("Configure POLYMARKET_PRIVATE_KEY")
+        funder = os.getenv("POLYMARKET_FUNDER", "")
+        if not pk or not funder:
+            raise RuntimeError("Configure POLYMARKET_PRIVATE_KEY e POLYMARKET_FUNDER")
         if not pk.startswith("0x"):
             pk = f"0x{pk}"
 
@@ -142,7 +145,17 @@ def get_client() -> Any:
             chain_id=CHAIN_ID,
             key=pk,
             signature_type=1,
+            funder=funder,
         )
+
+        api_key = os.getenv("POLYMARKET_API_KEY", "")
+        api_secret = os.getenv("POLYMARKET_API_SECRET", "")
+        api_pass = os.getenv("POLYMARKET_PASSPHRASE", "")
+        if api_key and api_secret and api_pass:
+            _client.set_api_creds(ApiCreds(api_key, api_secret, api_pass))
+        else:
+            _client.set_api_creds(_client.create_or_derive_api_creds())
+
     return _client
 
 
@@ -414,38 +427,44 @@ def get_best_ask(token_id: str) -> Optional[float]:
     return None
 
 
-def fetch_book(token_id: str) -> Optional[dict]:
-    http = get_http()
-    base = CLOB_HOST.rstrip("/")
+def get_best_bid(token_id: str) -> Optional[float]:
+    """Best bid do book CLOB."""
     try:
-        r = http.get(f"{base}/book", params={"token_id": token_id})
+        http = get_http()
+        r = http.get(f"{CLOB_HOST.rstrip('/')}/book", params={"token_id": token_id})
         if r.status_code == 200:
-            return r.json()
+            book = r.json()
+            bids = book.get("bids", [])
+            if bids:
+                return _float_price(bids[0].get("price") or bids[0].get("p"))
     except Exception:
         pass
     return None
 
 
 def get_usdc_balance() -> Optional[float]:
+    """Saldo USDC disponível para trade (CLOB API)."""
     global _usdc_balance_cache, _usdc_balance_cache_ts
     now = time.time()
     if _usdc_balance_cache is not None and (now - _usdc_balance_cache_ts) < BALANCE_CACHE_TTL:
         return _usdc_balance_cache
 
     try:
+        from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
         client = get_client()
-        resp = client.get_balance_allowance()
-        if not isinstance(resp, dict):
-            return None
-        balances = resp.get("balances") or []
-        for b in balances:
-            if (b.get("asset_type") or "").lower() == "usdc":
-                bal = float(b.get("available") or 0)
-                _usdc_balance_cache = bal
-                _usdc_balance_cache_ts = now
-                return bal
+        params = BalanceAllowanceParams(
+            asset_type=AssetType.COLLATERAL,
+            signature_type=1,
+        )
+        result = client.get_balance_allowance(params)
+        if isinstance(result, dict):
+            raw_balance = result.get("balance", "0")
+            bal = int(raw_balance) / 10**6
+            _usdc_balance_cache = bal
+            _usdc_balance_cache_ts = now
+            return bal
     except Exception:
-        return None
+        pass
     return None
 
 
@@ -476,21 +495,88 @@ def place_order(token_id: str, price: float, size: float) -> Optional[str]:
     return None
 
 
-def place_hedge_order(token_id: str, price: float, size: float) -> Optional[str]:
+def place_sell_order(token_id: str, price: float, size: float) -> Optional[str]:
+    """Envia ordem de SELL FOK (taker, fill imediato)."""
     try:
-        from py_clob_client.clob_types import OrderArgs, OrderType  # type: ignore
-        from py_clob_client.order_builder.constants import BUY  # type: ignore
+        from py_clob_client.clob_types import OrderArgs, OrderType
+        from py_clob_client.order_builder.constants import SELL
 
         client = get_client()
-        order_args = OrderArgs(token_id=token_id, price=price, size=size, side=BUY)
+        order_args = OrderArgs(token_id=token_id, price=price, size=size, side=SELL)
         signed_order = client.create_order(order_args)
         resp = client.post_order(signed_order, OrderType.FOK, post_only=False)
         if isinstance(resp, dict) and resp.get("orderID"):
             return resp.get("orderID")
-        print(f"[ERRO] place_hedge_order: {resp}")
+        print(f"[ERRO] place_sell_order: {resp}")
     except Exception as e:
-        print(f"[ERRO] place_hedge_order: {e}")
+        print(f"[ERRO] place_sell_order: {e}")
     return None
+
+
+def evaluate_stop_loss(
+    ctx: MarketContext,
+    yes_price: float,
+    no_price: float,
+) -> Optional[dict]:
+    """Avalia se deve executar stop-loss. Retorna dict ou None."""
+    if ctx.state != MarketState.HOLDING:
+        return None
+    if ctx.stop_executed:
+        return None
+    if ctx.entered_side is None or ctx.entered_price is None or ctx.entered_size is None:
+        return None
+
+    our_price = yes_price if ctx.entered_side == "YES" else no_price
+
+    if our_price >= STOP_PROB:
+        return None
+
+    our_token = ctx.yes_token_id if ctx.entered_side == "YES" else ctx.no_token_id
+
+    return {
+        "token_id": our_token,
+        "side": ctx.entered_side,
+        "size": ctx.entered_size,
+        "our_price": round(our_price, 4),
+        "trigger": STOP_PROB,
+    }
+
+
+def execute_stop_loss(ctx: MarketContext, stop: dict) -> bool:
+    """Executa SELL FOK do token posicionado a mercado."""
+    best_bid = get_best_bid(stop["token_id"])
+    if best_bid is None:
+        log_event("STOP_SKIPPED", ctx.asset, ctx, reason="no_bid")
+        return False
+
+    sell_price = 0.01  # Mercado: aceita qualquer bid
+
+    order_id = place_sell_order(stop["token_id"], sell_price, stop["size"])
+    if not order_id:
+        log_event("STOP_NOT_FILLED", ctx.asset, ctx,
+            sell_price=sell_price, size=stop["size"], reason="order_rejected")
+        return False
+
+    filled = check_order_filled(order_id)
+    if filled:
+        exec_price = best_bid
+        stop_pnl = round((exec_price - ctx.entered_price) * stop["size"], 4)
+        ctx.stop_executed = True
+        ctx.stop_price = exec_price
+        ctx.stop_size = stop["size"]
+        ctx.stop_ts = int(time.time())
+        ctx.stop_order_id = order_id
+        ctx.stop_pnl = stop_pnl
+        ctx.state = MarketState.DONE
+        log_event("STOP_EXECUTED", ctx.asset, ctx,
+            sell_price=exec_price, size=stop["size"],
+            stop_pnl=stop_pnl, our_price=stop["our_price"],
+            trigger=STOP_PROB, order_id=order_id)
+        return True
+    else:
+        log_event("STOP_NOT_FILLED", ctx.asset, ctx,
+            sell_price=sell_price, size=stop["size"], reason="FOK_not_matched")
+        return False
 
 
 def cancel_order(order_id: str) -> bool:
@@ -534,7 +620,14 @@ def reset_context(ctx: MarketContext):
     ctx.entered_size = None
     ctx.entered_ts = None
     ctx.skip_retried = False
-    ctx.defense_tracker = None
+    ctx.yes_price = None
+    ctx.no_price = None
+    ctx.stop_executed = False
+    ctx.stop_price = None
+    ctx.stop_size = None
+    ctx.stop_ts = None
+    ctx.stop_order_id = None
+    ctx.stop_pnl = None
 
 
 def signal_handler(signum, frame):
@@ -576,6 +669,7 @@ def main():
     print(f"JANELA: {ENTRY_WINDOW_START}s a {ENTRY_WINDOW_END}s antes da expiração")
     print(f"RANGE: {MIN_PRICE*100:.0f}% a {MAX_PRICE*100:.0f}%")
     print(f"SHARES: {MIN_SHARES}")
+    print(f"STOP-LOSS: prob < {STOP_PROB*100:.0f}%")
     if dry_run:
         print("MODO: DRY-RUN (sem ordens)")
     print("=" * 60)
@@ -603,8 +697,6 @@ def main():
 
     contexts = {asset: MarketContext(asset=asset) for asset in ASSETS}
     guardrails = {asset: GuardrailsPro(asset=asset) for asset in ASSETS}
-    pd_config = PostDefenseConfig()
-    pd_engines = {asset: PostDefenseEngine(asset, pd_config) for asset in ASSETS}
 
     print("Iniciando loop principal... (Ctrl+C para parar)")
     print()
@@ -626,8 +718,8 @@ def main():
                         side=pdata["side"],
                         entry_price=pdata["entry_price"],
                         size=pdata["size"],
-                        hedge_shares=pdata["hedge_shares"],
-                        defense_phase=pdata["defense_phase"],
+                        stop_executed=pdata.get("stop_executed", False),
+                        stop_pnl=pdata.get("stop_pnl"),
                         age_s=age,
                         reason="max_pending_age_exceeded",
                     )
@@ -635,8 +727,12 @@ def main():
                     continue
                 outcome = _get_resolved_outcome(pdata["asset"], pdata["cycle_end_ts"], retries=5, delay=5.0)
                 if outcome is not None:
-                    win = pdata["side"] == outcome
-                    pnl = (1.0 - pdata["entry_price"]) * pdata["size"] if win else -pdata["entry_price"] * pdata["size"]
+                    if pdata.get("stop_executed") and pdata.get("stop_pnl") is not None:
+                        pnl = pdata["stop_pnl"]
+                        win = pnl > 0
+                    else:
+                        win = pdata["side"] == outcome
+                        pnl = (1.0 - pdata["entry_price"]) * pdata["size"] if win else -pdata["entry_price"] * pdata["size"]
                     tmp_ctx = MarketContext(asset=pdata["asset"])
                     tmp_ctx.cycle_end_ts = pdata["cycle_end_ts"]
                     log_event(
@@ -649,9 +745,8 @@ def main():
                         size=pdata["size"],
                         win=win,
                         pnl=round(pnl, 2),
-                        hedge_shares=pdata["hedge_shares"],
-                        defense_phase=pdata["defense_phase"],
-                        entered_side_price_final=pdata["entered_side_price_final"],
+                        stop_executed=pdata.get("stop_executed", False),
+                        stop_pnl=pdata.get("stop_pnl"),
                     )
                     resolved_keys.append(key)
             for key in resolved_keys:
@@ -671,8 +766,6 @@ def main():
             yes_price = market["yes_price"]
             no_price = market["no_price"]
             guardrails[asset].update(float(now), yes_price, no_price)
-            if ctx.state != MarketState.HOLDING:
-                pd_engines[asset].update(float(now), yes_price, time_to_expiry)
             yes_token = market["yes_token"]
             no_token = market["no_token"]
 
@@ -696,29 +789,30 @@ def main():
 
             if ctx.cycle_end_ts != end_ts:
                 old_cycle = ctx.cycle_end_ts
-                if ctx.state == MarketState.HOLDING and ctx.entered_side and ctx.entered_price is not None and old_cycle is not None:
+                if ctx.state in (MarketState.HOLDING, MarketState.DONE) and ctx.entered_side and ctx.entered_price is not None and old_cycle is not None:
                     outcome_winner = _get_resolved_outcome(asset, old_cycle, retries=5, delay=5.0)
                     size = ctx.entered_size if ctx.entered_size is not None else MIN_SHARES
-                    hedge_total = ctx.defense_tracker.total_hedge_shares if ctx.defense_tracker else 0
-                    final_phase = ctx.defense_tracker.phase.value if ctx.defense_tracker else "NONE"
-                    entered_side_price_final = round(yes_price if ctx.entered_side == "YES" else no_price, 4)
-                    if outcome_winner is not None:
+
+                    if ctx.stop_executed and ctx.stop_pnl is not None:
+                        log_event("POSITION_RESULT", asset, ctx,
+                            outcome_winner=outcome_winner or "N/A",
+                            side=ctx.entered_side,
+                            entry_price=ctx.entered_price,
+                            size=size,
+                            pnl=ctx.stop_pnl,
+                            stop_executed=True,
+                            stop_price=ctx.stop_price)
+                    elif outcome_winner is not None:
                         win = ctx.entered_side == outcome_winner
                         pnl = (1.0 - ctx.entered_price) * size if win else -ctx.entered_price * size
-                        log_event(
-                            "POSITION_RESULT",
-                            asset,
-                            ctx,
+                        log_event("POSITION_RESULT", asset, ctx,
                             outcome_winner=outcome_winner,
                             side=ctx.entered_side,
                             entry_price=ctx.entered_price,
                             size=size,
                             win=win,
                             pnl=round(pnl, 2),
-                            hedge_shares=hedge_total,
-                            defense_phase=final_phase,
-                            entered_side_price_final=entered_side_price_final,
-                        )
+                            stop_executed=False)
                     else:
                         pending_key = f"{asset}:{old_cycle}"
                         _pending_results[pending_key] = {
@@ -727,25 +821,17 @@ def main():
                             "side": ctx.entered_side,
                             "entry_price": ctx.entered_price,
                             "size": size,
-                            "hedge_shares": hedge_total,
-                            "defense_phase": final_phase,
-                            "entered_side_price_final": entered_side_price_final,
+                            "stop_executed": ctx.stop_executed,
+                            "stop_pnl": ctx.stop_pnl,
                             "added_ts": now,
                         }
-                        log_event(
-                            "POSITION_RESULT_PENDING",
-                            asset,
-                            ctx,
+                        log_event("POSITION_RESULT_PENDING", asset, ctx,
                             side=ctx.entered_side,
                             entry_price=ctx.entered_price,
                             size=size,
-                            hedge_shares=hedge_total,
-                            defense_phase=final_phase,
-                            reason="outcome_not_resolved_after_retries",
-                        )
+                            reason="outcome_not_resolved_after_retries")
                 reset_context(ctx)
                 guardrails[asset].reset()
-                pd_engines[asset].clear_position()
                 ctx.cycle_end_ts = end_ts
                 log_event("NEW_CYCLE", asset, ctx, end_ts=end_ts, title=market["title"], slug=market.get("slug"))
 
@@ -784,43 +870,17 @@ def main():
             if ctx.state in (MarketState.DONE, MarketState.SKIPPED):
                 continue
 
+            # HOLDING — stop-loss por probabilidade
             if ctx.state == MarketState.HOLDING:
-                if pd_config.enabled and ctx.defense_tracker is not None:
-                    try:
-                        entered_token = ctx.yes_token_id if ctx.entered_side == "YES" else ctx.no_token_id
-                        book_json = fetch_book(entered_token) if entered_token else None
-                        snap = pd_engines[asset].update(float(now), yes_price, time_to_expiry, book_json)
-                        opp_token, _ = get_opposite_token(ctx.entered_side, ctx.yes_token_id, ctx.no_token_id)
-                        best_ask_opp = get_best_ask(opp_token) if opp_token else None
-                        decision = pd_evaluate(
-                            tracker=ctx.defense_tracker,
-                            snap=snap,
-                            entered_side=ctx.entered_side,
-                            entered_shares=ctx.entered_size or MIN_SHARES,
-                            yes_token_id=ctx.yes_token_id,
-                            no_token_id=ctx.no_token_id,
-                            best_ask_opposite=best_ask_opp,
-                            config=pd_config,
-                            now_ts=float(now),
-                        )
-                        if decision.should_hedge and decision.hedge_shares > 0:
-                            hedge_cost = decision.hedge_price * decision.hedge_shares
-                            if hedge_cost > 0:
-                                log_event("HEDGE_PLACING", asset, ctx, shares=decision.hedge_shares, price=decision.hedge_price)
-                                hedge_id = place_hedge_order(decision.hedge_token_id, decision.hedge_price, decision.hedge_shares)
-                                if hedge_id:
-                                    filled = check_order_filled(hedge_id)
-                                    if filled:
-                                        ctx.defense_tracker.total_hedge_shares += decision.hedge_shares
-                                        ctx.defense_tracker.last_hedge_ts = float(now)
-                                        ctx.defense_tracker.hedge_order_id = hedge_id
-                                        log_event("HEDGE_FILLED", asset, ctx, shares=decision.hedge_shares, price=decision.hedge_price, total_hedged=ctx.defense_tracker.total_hedge_shares)
-                                    else:
-                                        log_event("HEDGE_NOT_FILLED", asset, ctx, shares=decision.hedge_shares, reason="FOK_not_matched")
-                                else:
-                                    log_event("HEDGE_FAILED", asset, ctx, reason="order_rejected")
-                    except Exception as e:
-                        print(f"[ERRO] post_defense({asset}): {e}")
+                if not ctx.stop_executed:
+                    stop = evaluate_stop_loss(ctx, yes_price, no_price)
+                    if stop is not None:
+                        log_event("STOP_SIGNAL", asset, ctx,
+                            our_price=stop["our_price"],
+                            trigger=STOP_PROB,
+                            size=stop["size"],
+                            time_left=time_to_expiry)
+                        execute_stop_loss(ctx, stop)
                 continue
 
             if ctx.trade_attempts >= 1:
@@ -908,21 +968,6 @@ def main():
                     ctx.entered_ts = now
                     ctx.order_id = None
                     log_event("FILLED", asset, ctx, side=side, price=current_price)
-                    if pd_config.enabled:
-                        vol_s, vol_l, z_v = pd_engines[asset].snapshot_regime()
-                        meta = PositionMeta(
-                            market_id=asset,
-                            side=side,
-                            entry_price=current_price,
-                            entry_time_s=float(now),
-                            position_shares=MIN_SHARES,
-                            vol_entry_short=vol_s,
-                            vol_entry_long=vol_l,
-                            z_vol_entry=z_v,
-                        )
-                        pd_engines[asset].start_position(meta)
-                        ctx.defense_tracker = DefenseStateTracker()
-                        log_event("DEFENSE_STARTED", asset, ctx, vol_entry_short=round(vol_s, 6), vol_entry_long=round(vol_l, 6))
                     break
                 cancel_order(order_id)
                 ctx.order_id = None
