@@ -739,7 +739,8 @@ def main():
                         reason="max_pending_age_exceeded")
                     resolved_keys.append(key)
                     continue
-                outcome = _get_resolved_outcome(pdata["asset"], pdata["cycle_end_ts"], retries=1, delay=0)
+                # 6 tentativas × 3s = até 18s para o oráculo resolver
+                outcome = _get_resolved_outcome(pdata["asset"], pdata["cycle_end_ts"], retries=6, delay=3.0)
                 if outcome is not None:
                     if pdata.get("stop_executed") and pdata.get("stop_pnl") is not None:
                         pnl = pdata["stop_pnl"]
