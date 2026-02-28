@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Bot 24/7 para mercados 15min do Polymarket (BTC, ETH, SOL, XRP).
+Bot 24/7 para mercados 15min do Polymarket (BTC, ETH).
 
 Estratégia:
 - Detecta ciclos de 15min automaticamente
-- Entra quando YES ou NO estiver entre 93%-98%
-- Janela de entrada: 4min a 1min antes da expiração
-- Stop-loss: vende (SELL FOK) se prob do lado cair abaixo de 70%
+- Parâmetros per-asset (prob, janela, stop-loss) otimizados por backtest
+- BTC: prob>=0.625, janela 240s-60s, stop 20%
+- ETH: prob>=0.650, janela 120s-30s, stop 5%
 - Máximo 1 trade por ciclo por mercado
 
 USO:
@@ -48,23 +48,27 @@ CHAIN_ID = 137
 
 # Configurações do bot
 POLL_SECONDS = 1           # Intervalo do loop principal
-ENTRY_WINDOW_START = 240   # Segundos antes da expiração (4min)
-ENTRY_WINDOW_END = 60      # Hard stop (1min)
 FILL_TIMEOUT = 5           # Segundos para aguardar fill por tentativa
 MAX_FILL_ATTEMPTS = 3      # Tentativas de ordem (1 inicial + 2 reenvios 1 tick abaixo) antes de SKIPPED
 MIN_SHARES = 8             # Quantidade por ordem
-MIN_PRICE = 0.93           # Preço mínimo para entrada (93%) — NÃO ALTERAR, definido pelo dono
-MAX_PRICE = 0.98           # Preço máximo para entrada
+MAX_PRICE = 0.98           # Preço máximo para entrada (teto geral)
 MIN_BALANCE_USDC = 8.2     # Saldo mínimo (USDC) para 8 shares @ 98%
 ORDER_FAIL_RETRY_DELAY = 2 # Segundos antes de reenviar após falha
 ORDER_FAIL_MAX_RETRIES = 2 # Tentativas de place_order antes de desistir
 MAX_RETRY_PRICE_DELTA = float(os.getenv("MAX_RETRY_PRICE_DELTA", "0.04"))  # Max centavos acima do preco original no retry
 
-# Stop-loss
-STOP_PROB = float(os.getenv("BL_STOP_PROB", "0.40"))           # Vende se prob do lado cair abaixo
+# Parâmetros per-asset (otimizados por backtest)
+# prob      = preço mínimo de entrada (min_price)
+# t_max     = início da janela (segundos antes da expiração)
+# t_min     = hard stop (segundos antes da expiração)
+# stop      = stop-loss threshold
+ASSET_PARAMS = {
+    'btc': {'min_price': 0.625, 'entry_window_start': 240, 'entry_window_end': 60, 'stop_prob': 0.20},
+    'eth': {'min_price': 0.650, 'entry_window_start': 120, 'entry_window_end': 30, 'stop_prob': 0.05},
+}
 
-# Mercados
-ASSETS = ['btc', 'eth', 'sol', 'xrp']
+# Mercados (derivado dos params)
+ASSETS = list(ASSET_PARAMS.keys())
 
 # Diretório de logs
 LOGS_DIR = Path(__file__).parent.parent / "logs"
@@ -257,7 +261,7 @@ def fetch_market_status(asset: str) -> Optional[dict]:
     """Busca status do mercado que está na janela de entrada.
 
     Verifica tanto a janela atual quanto a anterior, retornando o mercado
-    que está dentro da janela de operação (ENTRY_WINDOW_START a ENTRY_WINDOW_END).
+    que está dentro da janela de operação (per-asset entry_window_start/end).
     """
     try:
         http = get_http()
@@ -685,7 +689,8 @@ def evaluate_stop_loss(
     # Prob atual do nosso lado
     our_price = yes_price if ctx.entered_side == "YES" else no_price
 
-    if our_price >= STOP_PROB:
+    stop_prob = ASSET_PARAMS[ctx.asset]['stop_prob']
+    if our_price >= stop_prob:
         return None  # Ainda acima do threshold
 
     # Token que estamos segurando (vamos VENDER ele)
@@ -696,7 +701,7 @@ def evaluate_stop_loss(
         "side": ctx.entered_side,
         "size": ctx.entered_size,
         "our_price": round(our_price, 4),
-        "trigger": STOP_PROB,
+        "trigger": stop_prob,
     }
 
 
@@ -732,7 +737,7 @@ def execute_stop_loss(ctx: MarketContext, stop: dict) -> bool:
         log_event("STOP_EXECUTED", ctx.asset, ctx,
             sell_price=exec_price, size=stop["size"],
             stop_pnl=stop_pnl, our_price=stop["our_price"],
-            trigger=STOP_PROB, order_id=order_id)
+            trigger=ASSET_PARAMS[ctx.asset]['stop_prob'], order_id=order_id)
         return True
     else:
         log_event("STOP_NOT_FILLED", ctx.asset, ctx,
@@ -824,10 +829,9 @@ def main():
     print("=" * 60)
     print("BOT 15MIN - POLYMARKET")
     print(f"MERCADOS: {', '.join(a.upper() for a in ASSETS)}")
-    print(f"JANELA: {ENTRY_WINDOW_START}s a {ENTRY_WINDOW_END}s antes da expiração")
-    print(f"RANGE: {MIN_PRICE*100:.0f}% a {MAX_PRICE*100:.0f}%")
+    for a, p in ASSET_PARAMS.items():
+        print(f"  {a.upper()}: prob>={p['min_price']:.3f}  janela={p['entry_window_start']}s-{p['entry_window_end']}s  stop={p['stop_prob']:.0%}")
     print(f"SHARES: {MIN_SHARES}")
-    print(f"STOP-LOSS: prob < {STOP_PROB*100:.0f}%")
     print("=" * 60)
     print()
 
@@ -1007,8 +1011,11 @@ def main():
                     log_event("EXPIRED", asset, ctx)
                 continue
 
-            # 4. Menos de 60s? Hard stop
-            if time_to_expiry < ENTRY_WINDOW_END:
+            # Parâmetros per-asset
+            ap = ASSET_PARAMS[asset]
+
+            # 4. Menos de t_min? Hard stop
+            if time_to_expiry < ap['entry_window_end']:
                 if ctx.state == MarketState.ORDER_PLACED:
                     cancel_order(ctx.order_id)
                     ctx.state = MarketState.SKIPPED
@@ -1018,12 +1025,12 @@ def main():
                 continue
 
             # 5. Fora da janela de entrada?
-            if time_to_expiry > ENTRY_WINDOW_START:
+            if time_to_expiry > ap['entry_window_start']:
                 continue
 
-            # 5b. SKIPPED mas ainda na janela (5min–1min) e preço no range 93%–98%? Uma nova chance no mesmo ciclo.
+            # 5b. SKIPPED mas ainda na janela e preço no range? Uma nova chance no mesmo ciclo.
             if ctx.state == MarketState.SKIPPED and not ctx.skip_retried:
-                if (MIN_PRICE <= yes_price <= MAX_PRICE) or (MIN_PRICE <= no_price <= MAX_PRICE):
+                if (ap['min_price'] <= yes_price <= MAX_PRICE) or (ap['min_price'] <= no_price <= MAX_PRICE):
                     ctx.state = MarketState.IDLE
                     ctx.trade_attempts = 0
                     ctx.skip_retried = True
@@ -1040,7 +1047,7 @@ def main():
                     if stop is not None:
                         log_event("STOP_SIGNAL", asset, ctx,
                             our_price=stop["our_price"],
-                            trigger=STOP_PROB,
+                            trigger=ap['stop_prob'],
                             size=stop["size"],
                             time_left=time_to_expiry)
                         execute_stop_loss(ctx, stop)
@@ -1049,14 +1056,14 @@ def main():
             if ctx.trade_attempts >= 1:
                 continue  # ja deu fill neste ciclo — nao reenvia
 
-            # 7. Verificar condição 95%-98%
+            # 7. Verificar condição de entrada (prob >= min_price)
             side, token_id, price = None, None, None
 
-            if MIN_PRICE <= yes_price <= MAX_PRICE:
+            if ap['min_price'] <= yes_price <= MAX_PRICE:
                 side = "YES"
                 token_id = yes_token
                 price = max(0.01, round(yes_price - 0.01, 2))
-            elif MIN_PRICE <= no_price <= MAX_PRICE:
+            elif ap['min_price'] <= no_price <= MAX_PRICE:
                 side = "NO"
                 token_id = no_token
                 price = max(0.01, round(no_price - 0.01, 2))
@@ -1152,7 +1159,7 @@ def main():
                     ctx.trade_attempts += 1
                     ctx.state = MarketState.SKIPPED
                     break
-                if current_price < MIN_PRICE:
+                if current_price < ap['min_price']:
                     ctx.trade_attempts += 1
                     ctx.state = MarketState.SKIPPED
                     break
