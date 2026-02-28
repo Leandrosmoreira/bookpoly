@@ -286,6 +286,12 @@ def _get_resolved_outcome(asset: str, cycle_end_ts: int, retries: int = 3, delay
 
     Faz até `retries` tentativas com `delay` segundos entre cada,
     pois a Gamma API pode demorar para refletir a resolução.
+
+    Checagens (em ordem de prioridade):
+    1. Campo 'resolved' ou 'closed' no market (boolean)
+    2. outcomePrices "1,0" ou "0,1" (exato)
+    3. outcomePrices com threshold relaxado (>= 0.90 / <= 0.10)
+
     Retorna None apenas se todas as tentativas falharem.
     """
     http = get_http()
@@ -306,7 +312,14 @@ def _get_resolved_outcome(asset: str, cycle_end_ts: int, retries: int = 3, delay
                     time.sleep(delay)
                 continue
             market = markets[0]
-            # outcomePrices após resolução: "1,0" = YES venceu, "0,1" = NO venceu
+
+            # 1. Campo 'resolved' ou 'closed' (alguns mercados usam)
+            if market.get("resolved") is True or market.get("closed") is True:
+                winner = market.get("winner")
+                if winner in ("YES", "NO"):
+                    return winner
+
+            # 2. outcomePrices
             raw = market.get("outcomePrices")
             if raw is None:
                 if attempt < retries - 1:
@@ -325,11 +338,20 @@ def _get_resolved_outcome(asset: str, cycle_end_ts: int, retries: int = 3, delay
                 if attempt < retries - 1:
                     time.sleep(delay)
                 continue
+
+            # 2a. Exato: 1/0
             if p0 >= 0.99 and p1 <= 0.01:
                 return "YES"
             if p1 >= 0.99 and p0 <= 0.01:
                 return "NO"
-            # outcomePrices existe mas nao e 1,0 ou 0,1 — mercado nao resolveu ainda
+
+            # 2b. Relaxado: >= 0.90 / <= 0.10 (Gamma pode demorar a ir para 1.0/0.0)
+            if p0 >= 0.90 and p1 <= 0.10:
+                return "YES"
+            if p1 >= 0.90 and p0 <= 0.10:
+                return "NO"
+
+            # outcomePrices existe mas nenhum lado dominante — mercado nao resolveu
             if attempt < retries - 1:
                 time.sleep(delay)
                 continue
@@ -840,25 +862,42 @@ def main():
         now = int(time.time())
 
         # ── Resolver resultados pendentes (posicoes cujo outcome nao foi obtido na transicao)
+        # IMPORTANTE: usar retries=1 e delay=0 para nao bloquear o loop principal.
+        # Com retries=5/delay=5 o loop ficava bloqueado 25s por pending (bug anterior).
         if _pending_results:
             resolved_keys = []
             for key, pdata in list(_pending_results.items()):
                 age = now - pdata.get("added_ts", now)
-                # Max age: 10 minutos — se nao resolveu, logar UNKNOWN e limpar
-                if age > 600:
+                # Max age: 30 minutos — mercados 15min podem demorar para resolver no oracle
+                if age > 1800:
+                    # Fallback: estimar resultado pela probabilidade de entrada
+                    # Entrada foi entre 93-98%, chance de win > 93%
+                    side = pdata["side"]
+                    entry_price = pdata["entry_price"]
+                    size = pdata["size"]
+                    if pdata.get("stop_executed") and pdata.get("stop_pnl") is not None:
+                        pnl = pdata["stop_pnl"]
+                        win = pnl > 0
+                    else:
+                        # Assumir win se entrada foi em prob >= 0.90 (alta confiança)
+                        win = entry_price >= 0.90
+                        pnl = (1.0 - entry_price) * size if win else -entry_price * size
                     tmp_ctx = MarketContext(asset=pdata["asset"])
                     tmp_ctx.cycle_end_ts = pdata["cycle_end_ts"]
-                    log_event("POSITION_RESULT_UNKNOWN", pdata["asset"], tmp_ctx,
-                        side=pdata["side"],
-                        entry_price=pdata["entry_price"],
-                        size=pdata["size"],
+                    log_event("POSITION_RESULT_ESTIMATED", pdata["asset"], tmp_ctx,
+                        side=side,
+                        entry_price=entry_price,
+                        size=size,
+                        win=win,
+                        pnl=round(pnl, 2),
                         stop_executed=pdata.get("stop_executed", False),
                         stop_pnl=pdata.get("stop_pnl"),
                         age_s=age,
-                        reason="max_pending_age_exceeded")
+                        reason="estimated_by_entry_prob")
                     resolved_keys.append(key)
                     continue
-                outcome = _get_resolved_outcome(pdata["asset"], pdata["cycle_end_ts"], retries=5, delay=5.0)
+                # Non-blocking: 1 tentativa sem delay (não trava o loop)
+                outcome = _get_resolved_outcome(pdata["asset"], pdata["cycle_end_ts"], retries=1, delay=0)
                 if outcome is not None:
                     if pdata.get("stop_executed") and pdata.get("stop_pnl") is not None:
                         pnl = pdata["stop_pnl"]
@@ -914,7 +953,7 @@ def main():
                 old_cycle = ctx.cycle_end_ts
                 # Gravar resultado da posição do ciclo anterior ANTES de resetar
                 if ctx.state in (MarketState.HOLDING, MarketState.DONE) and ctx.entered_side and ctx.entered_price is not None and old_cycle is not None:
-                    outcome_winner = _get_resolved_outcome(asset, old_cycle, retries=5, delay=5.0)
+                    outcome_winner = _get_resolved_outcome(asset, old_cycle, retries=3, delay=2.0)
                     size = ctx.entered_size if ctx.entered_size is not None else MIN_SHARES
 
                     if ctx.stop_executed and ctx.stop_pnl is not None:

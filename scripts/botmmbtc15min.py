@@ -452,6 +452,11 @@ def _get_resolved_outcome(cycle_end_ts: int, retries: int = 3, delay: float = 3.
                     time.sleep(delay)
                 continue
             market = markets[0]
+            # 1. Campo 'resolved' ou 'closed' no market
+            if market.get("resolved") is True or market.get("closed") is True:
+                winner = market.get("winner")
+                if winner in ("YES", "NO"):
+                    return winner
             raw = market.get("outcomePrices")
             if raw is None:
                 if attempt < retries - 1:
@@ -470,9 +475,15 @@ def _get_resolved_outcome(cycle_end_ts: int, retries: int = 3, delay: float = 3.
                 if attempt < retries - 1:
                     time.sleep(delay)
                 continue
+            # 2a. Exato: 1/0
             if p0 >= 0.99 and p1 <= 0.01:
                 return "YES"
             if p1 >= 0.99 and p0 <= 0.01:
+                return "NO"
+            # 2b. Relaxado: >= 0.90 / <= 0.10
+            if p0 >= 0.90 and p1 <= 0.10:
+                return "YES"
+            if p1 >= 0.90 and p0 <= 0.10:
                 return "NO"
             if attempt < retries - 1:
                 time.sleep(delay)
@@ -886,7 +897,7 @@ def main():
 
             # Resolver resultado do ciclo anterior
             if old_cycle is not None and ctx.position_shares > 0 and ctx.active_side:
-                outcome = _get_resolved_outcome(old_cycle, retries=5, delay=5.0)
+                outcome = _get_resolved_outcome(old_cycle, retries=3, delay=2.0)
                 if ctx.stop_executed and ctx.stop_pnl is not None:
                     log_event("CYCLE_RESULT", ctx, outcome=outcome or "N/A",
                               pnl=ctx.stop_pnl, method="stop/market_sell")
@@ -939,7 +950,7 @@ def main():
             if ctx.state not in (MMState.DONE,):
                 # Resolver posição mantida
                 if ctx.position_shares > 0:
-                    outcome = _get_resolved_outcome(end_ts, retries=5, delay=5.0)
+                    outcome = _get_resolved_outcome(end_ts, retries=3, delay=2.0)
                     if outcome and ctx.active_side:
                         win = ctx.active_side == outcome
                         hold_pnl = ((1.0 - ctx.position_avg_price) * ctx.position_shares if win

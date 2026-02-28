@@ -318,9 +318,15 @@ def _get_resolved_outcome(asset: str, cycle_end_ts: int, retries: int = 3, delay
                 if attempt < retries - 1:
                     time.sleep(delay)
                 continue
+            # Exato: 1/0
             if p0 >= 0.99 and p1 <= 0.01:
                 return "YES"
             if p1 >= 0.99 and p0 <= 0.01:
+                return "NO"
+            # Relaxado: >= 0.90 / <= 0.10
+            if p0 >= 0.90 and p1 <= 0.10:
+                return "YES"
+            if p1 >= 0.90 and p0 <= 0.10:
                 return "NO"
             if attempt < retries - 1:
                 time.sleep(delay)
@@ -819,7 +825,7 @@ def main():
                         reason="max_pending_age_exceeded")
                     resolved_keys.append(key)
                     continue
-                outcome = _get_resolved_outcome(pdata["asset"], pdata["cycle_end_ts"], retries=5, delay=5.0)
+                outcome = _get_resolved_outcome(pdata["asset"], pdata["cycle_end_ts"], retries=1, delay=0)
                 if outcome is not None:
                     if pdata.get("stop_executed") and pdata.get("stop_pnl") is not None:
                         pnl = pdata["stop_pnl"]
@@ -870,7 +876,7 @@ def main():
             if ctx.cycle_end_ts != end_ts:
                 old_cycle = ctx.cycle_end_ts
                 if ctx.state in (MarketState.HOLDING, MarketState.DONE) and ctx.entered_side and ctx.entered_price is not None and old_cycle is not None:
-                    outcome_winner = _get_resolved_outcome(asset, old_cycle, retries=5, delay=5.0)
+                    outcome_winner = _get_resolved_outcome(asset, old_cycle, retries=3, delay=2.0)
                     size = ctx.entered_size if ctx.entered_size is not None else MIN_SHARES
 
                     if ctx.stop_executed and ctx.stop_pnl is not None:
