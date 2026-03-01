@@ -50,9 +50,8 @@ CHAIN_ID = 137
 POLL_SECONDS = 1           # Intervalo do loop principal
 FILL_TIMEOUT = 5           # Segundos para aguardar fill por tentativa
 MAX_FILL_ATTEMPTS = 3      # Tentativas de ordem (1 inicial + 2 reenvios 1 tick abaixo) antes de SKIPPED
-MIN_SHARES = 8             # Quantidade por ordem
 MAX_PRICE = 0.98           # Preço máximo para entrada (teto geral)
-MIN_BALANCE_USDC = 8.2     # Saldo mínimo (USDC) para 8 shares @ 98%
+MIN_BALANCE_USDC = 12.2    # Saldo mínimo (USDC) para 12 shares @ 98%
 ORDER_FAIL_RETRY_DELAY = 2 # Segundos antes de reenviar após falha
 ORDER_FAIL_MAX_RETRIES = 2 # Tentativas de place_order antes de desistir
 MAX_RETRY_PRICE_DELTA = float(os.getenv("MAX_RETRY_PRICE_DELTA", "0.04"))  # Max centavos acima do preco original no retry
@@ -63,8 +62,8 @@ MAX_RETRY_PRICE_DELTA = float(os.getenv("MAX_RETRY_PRICE_DELTA", "0.04"))  # Max
 # t_min     = hard stop (segundos antes da expiração)
 # stop      = stop-loss threshold
 ASSET_PARAMS = {
-    'btc': {'min_price': 0.625, 'entry_window_start': 240, 'entry_window_end': 60, 'stop_prob': 0.20},
-    'eth': {'min_price': 0.650, 'entry_window_start': 120, 'entry_window_end': 30, 'stop_prob': 0.05},
+    'btc': {'min_price': 0.625, 'entry_window_start': 240, 'entry_window_end': 60, 'stop_prob': 0.20, 'shares': 12},
+    'eth': {'min_price': 0.650, 'entry_window_start': 120, 'entry_window_end': 30, 'stop_prob': 0.05, 'shares': 8},
 }
 
 # Mercados (derivado dos params)
@@ -240,7 +239,7 @@ def log_event(action: str, asset: str, ctx: MarketContext, **extra):
             and yp is not None and np_ is not None):
         side_now, winning, pnl = calc_clob_pnl(
             ctx.entered_side, ctx.entered_price,
-            yp, np_, ctx.entered_size or MIN_SHARES
+            yp, np_, ctx.entered_size or ASSET_PARAMS[ctx.asset]['shares']
         )
         emoji = "\u2705" if winning else "\u274c"
         label = "WINNING" if winning else "LOSING"
@@ -830,8 +829,7 @@ def main():
     print("BOT 15MIN - POLYMARKET")
     print(f"MERCADOS: {', '.join(a.upper() for a in ASSETS)}")
     for a, p in ASSET_PARAMS.items():
-        print(f"  {a.upper()}: prob>={p['min_price']:.3f}  janela={p['entry_window_start']}s-{p['entry_window_end']}s  stop={p['stop_prob']:.0%}")
-    print(f"SHARES: {MIN_SHARES}")
+        print(f"  {a.upper()}: prob>={p['min_price']:.3f}  janela={p['entry_window_start']}s-{p['entry_window_end']}s  stop={p['stop_prob']:.0%}  shares={p['shares']}")
     print("=" * 60)
     print()
 
@@ -958,7 +956,7 @@ def main():
                 # Gravar resultado da posição do ciclo anterior ANTES de resetar
                 if ctx.state in (MarketState.HOLDING, MarketState.DONE) and ctx.entered_side and ctx.entered_price is not None and old_cycle is not None:
                     outcome_winner = _get_resolved_outcome(asset, old_cycle, retries=3, delay=2.0)
-                    size = ctx.entered_size if ctx.entered_size is not None else MIN_SHARES
+                    size = ctx.entered_size if ctx.entered_size is not None else ASSET_PARAMS[asset]['shares']
 
                     if ctx.stop_executed and ctx.stop_pnl is not None:
                         # Stop-loss ja vendeu — PnL = stop_pnl
@@ -1117,8 +1115,8 @@ def main():
             filled = False
             for attempt in range(MAX_FILL_ATTEMPTS):
                 is_retry = attempt > 0
-                log_event("PLACING_ORDER", asset, ctx, side=side, price=current_price, size=MIN_SHARES, time_to_expiry=time_to_expiry, retry=is_retry)
-                order_id = place_order_with_retry(token_id, current_price, MIN_SHARES)
+                log_event("PLACING_ORDER", asset, ctx, side=side, price=current_price, size=ap['shares'], time_to_expiry=time_to_expiry, retry=is_retry)
+                order_id = place_order_with_retry(token_id, current_price, ap['shares'])
                 if not order_id:
                     ctx.trade_attempts += 1
                     ctx.state = MarketState.SKIPPED
@@ -1133,7 +1131,7 @@ def main():
                     ctx.state = MarketState.HOLDING
                     ctx.entered_side = side
                     ctx.entered_price = current_price
-                    ctx.entered_size = MIN_SHARES
+                    ctx.entered_size = ap['shares']
                     ctx.entered_ts = now
                     ctx.order_id = None
                     log_event("FILLED", asset, ctx, side=side, price=current_price)
