@@ -75,6 +75,9 @@ ASSET_PARAMS = {
 # Mercados (derivado dos params)
 ASSETS = list(ASSET_PARAMS.keys())
 
+# Minutos permitidos para operar (janelas de 5min que NÃO coincidem com ciclos de 15min)
+ALLOWED_MINUTES = {5, 10, 20, 25, 35, 40, 50, 55}
+
 # Diretório de logs
 LOGS_DIR = Path(__file__).parent.parent / "logs"
 
@@ -736,6 +739,7 @@ def reset_context(ctx: MarketContext):
     ctx.stop_ts = None
     ctx.stop_order_id = None
     ctx.stop_pnl = None
+    ctx._pause_logged = False
 
 
 # ==============================================================================
@@ -772,6 +776,7 @@ def main():
     print(f"MERCADOS: {', '.join(a.upper() for a in ASSETS)}")
     for a, p in ASSET_PARAMS.items():
         print(f"  {a.upper()}: prob>={p['min_price']:.3f}  janela={p['entry_window_start']}s-{p['entry_window_end']}s  stop={p['stop_prob']:.0%}  shares={p['shares']}")
+    print(f"MINUTOS PERMITIDOS: {sorted(ALLOWED_MINUTES)}")
     if dry_run:
         print("*** DRY-RUN MODE — sem ordens reais ***")
     print("=" * 60)
@@ -975,6 +980,22 @@ def main():
 
             if ctx.trade_attempts >= 1:
                 continue
+
+            # 6b. Filtro de minutos — só opera nos minutos permitidos
+            current_minute = datetime.utcfromtimestamp(now).minute
+            if current_minute not in ALLOWED_MINUTES:
+                if not getattr(ctx, '_pause_logged', False):
+                    log_event("TRADE_PAUSE", asset, ctx,
+                        mode="PAUSE", minute=current_minute,
+                        reason="minute_not_allowed",
+                        allowed=sorted(ALLOWED_MINUTES))
+                    ctx._pause_logged = True
+                continue
+            # Resetar flag de log ao voltar a operar
+            if getattr(ctx, '_pause_logged', False):
+                log_event("TRADE_RESUME", asset, ctx,
+                    mode="TRADE", minute=current_minute)
+                ctx._pause_logged = False
 
             # 7. Verificar condição de preço
             side, token_id, price = None, None, None
