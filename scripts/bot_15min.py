@@ -51,7 +51,7 @@ POLL_SECONDS = 1           # Intervalo do loop principal
 FILL_TIMEOUT = 5           # Segundos para aguardar fill por tentativa
 MAX_FILL_ATTEMPTS = 3      # Tentativas de ordem (1 inicial + 2 reenvios 1 tick abaixo) antes de SKIPPED
 MAX_PRICE = 0.98           # Preço máximo para entrada (teto geral)
-MIN_BALANCE_USDC = 35.0    # Saldo mínimo (USDC) para BTC18 + ETH15 @ ~98%
+MIN_BALANCE_USDC = 22.0    # Saldo mínimo (USDC) para maior mão (BTC21) @ ~98%
 ORDER_FAIL_RETRY_DELAY = 2 # Segundos antes de reenviar após falha
 ORDER_FAIL_MAX_RETRIES = 2 # Tentativas de place_order antes de desistir
 MAX_RETRY_PRICE_DELTA = float(os.getenv("MAX_RETRY_PRICE_DELTA", "0.04"))  # Max centavos acima do preco original no retry
@@ -62,8 +62,8 @@ MAX_RETRY_PRICE_DELTA = float(os.getenv("MAX_RETRY_PRICE_DELTA", "0.04"))  # Max
 # t_min     = hard stop (segundos antes da expiração)
 # stop      = stop-loss threshold
 ASSET_PARAMS = {
-    'btc': {'min_price': 0.625, 'entry_window_start': 240, 'entry_window_end': 60, 'stop_prob': 0.20, 'shares': 18},
-    'eth': {'min_price': 0.650, 'entry_window_start': 120, 'entry_window_end': 30, 'stop_prob': 0.05, 'shares': 15},
+    'btc': {'min_price': 0.625, 'entry_window_start': 240, 'entry_window_end': 60, 'stop_prob': 0.20, 'shares': 21},  # WR 68.7%
+    'eth': {'min_price': 0.650, 'entry_window_start': 120, 'entry_window_end': 30, 'stop_prob': 0.05, 'shares': 20},  # WR 68.5%
 }
 
 # Mercados (derivado dos params)
