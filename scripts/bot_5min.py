@@ -61,15 +61,15 @@ POLL_SECONDS = 1               # Intervalo do loop principal
 FILL_TIMEOUT = 5               # Segundos para aguardar fill por tentativa
 MAX_FILL_ATTEMPTS = 3          # Tentativas de ordem antes de SKIPPED
 MAX_PRICE = 0.99               # Preço máximo para entrada (teto geral)
-MIN_BALANCE_USDC = 10.2        # Saldo mínimo (USDC) para 10 shares @ 99%
+MIN_BALANCE_USDC = 50.0       # Saldo mínimo (USDC) para ETH25 + XRP22 @ ~99%
 ORDER_FAIL_RETRY_DELAY = 2     # Segundos antes de reenviar após falha
 ORDER_FAIL_MAX_RETRIES = 2     # Tentativas de place_order antes de desistir
 MAX_RETRY_PRICE_DELTA = float(os.getenv("MAX_RETRY_PRICE_DELTA", "0.04"))
 
 # Parâmetros per-asset (otimizados por backtest)
 ASSET_PARAMS = {
-    'eth': {'min_price': 0.600, 'entry_window_start': 80, 'entry_window_end': 20, 'stop_prob': 0.05, 'shares': 10},
-    'xrp': {'min_price': 0.825, 'entry_window_start': 40, 'entry_window_end': 10, 'stop_prob': 0.05, 'shares': 10},
+    'eth': {'min_price': 0.600, 'entry_window_start': 80, 'entry_window_end': 20, 'stop_prob': 0.05, 'shares': 25},
+    'xrp': {'min_price': 0.825, 'entry_window_start': 40, 'entry_window_end': 10, 'stop_prob': 0.05, 'shares': 22},
 }
 
 # Mercados (derivado dos params)
